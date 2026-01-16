@@ -143,12 +143,6 @@ class ControlPanel(QWidget):
         group = QGroupBox("Navigation")
         layout = QVBoxLayout(group)
         
-        # Copy boxes to next image button
-        self.copy_boxes_btn = QPushButton("Copy Boxes to Next Image")
-        self.copy_boxes_btn.clicked.connect(self.copy_boxes_to_next_requested.emit)
-        self.copy_boxes_btn.setEnabled(False)
-        layout.addWidget(self.copy_boxes_btn)
-        
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)

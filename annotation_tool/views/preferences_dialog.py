@@ -414,7 +414,7 @@ class PreferencesDialog(QDialog):
             self,
             "Select Classes File",
             self._classes_file or os.getcwd(),
-            "Text Files (*.txt);;Names Files (*.names);;All Files (*)"
+            "All Files (*)"
         )
         
         if file_path:

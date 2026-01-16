@@ -76,6 +76,7 @@ class MainController(QObject):
         self._main_window.control_panel.load_classes_requested.connect(self._on_load_classes_dialog)
         self._main_window.control_panel.copy_boxes_to_next_requested.connect(self._on_copy_boxes_to_next_requested)
         self._main_window.undo_requested.connect(self._on_undo_requested)
+        self._main_window.redo_requested.connect(self._on_redo_requested)
         self._main_window.control_panel.qa_answer_changed.connect(self._on_qa_answer_changed)
         
         # Annotation controller signals
@@ -634,6 +635,92 @@ class MainController(QObject):
             self._main_window.show_message("Undo successful")
         else:
             self._main_window.show_message("Nothing to undo")
+        
+        return success
+    
+    def _on_redo_requested(self):
+        """Handle redo request."""
+        # Check if we can redo
+        if not self._annotation_model.can_redo():
+            self._main_window.show_message("Nothing to redo")
+            return False
+        
+        # Get the last redo action to check if it's a copy operation
+        from ..models.undo_manager import ActionType
+        undo_manager = self._annotation_model._undo_manager
+        
+        # Peek at the last redo action without removing it
+        if undo_manager._redo_stack:
+            last_action = undo_manager._redo_stack[-1]
+            
+            # If it's a copy operation, handle it specially
+            if last_action.action_type == ActionType.COPY_BOXES_TO_NEXT:
+                # Pop the action from redo (moves it back to undo stack)
+                action = undo_manager.pop_redo_action()
+                data = action.data
+                
+                # Re-execute the copy operation
+                current_image_path = data["current_image_path"]
+                next_image_path = data["next_image_path"]
+                copied_count = data["copied_count"]
+                
+                # Get current image index to reload annotations
+                current_index = None
+                for i, img_path in enumerate(self._image_model.image_files):
+                    if img_path == current_image_path:
+                        current_index = i
+                        break
+                
+                if current_index is None:
+                    self._main_window.show_message("Cannot redo: current image not found")
+                    return False
+                
+                # Get current annotations from the current image
+                self._image_model.set_current_index(current_index)
+                self._annotation_controller.load_image_annotations(current_image_path)
+                current_annotations = [bbox.copy() for bbox in self._annotation_model.annotations]
+                
+                # Save current annotations first
+                self._annotation_controller.save_current_annotations()
+                
+                # Get next image's annotation path
+                import os
+                next_annotation_path = os.path.splitext(next_image_path)[0] + ".txt"
+                
+                # Load next image's existing annotations (if any)
+                self._annotation_model.load_annotations(next_annotation_path)
+                
+                # Copy all boxes from current image (don't record undo for individual adds)
+                for bbox in current_annotations:
+                    copied_bbox = bbox.copy()
+                    self._annotation_model.add_annotation(copied_bbox, record_undo=False)
+                
+                # Save the next image's annotations with copied boxes
+                success = self._annotation_model.save_annotations(next_annotation_path)
+                
+                if not success:
+                    self._main_window.show_error("Error", "Failed to save copied annotations")
+                    return False
+                
+                # Reload current image's annotations to restore state
+                self._image_model.set_current_index(current_index)
+                self._annotation_controller.load_image_annotations(current_image_path)
+                
+                # The action is already back in undo stack (via pop_redo_action)
+                # But we need to push it again since we re-executed it
+                # Actually, pop_redo_action already moved it back to undo, so we're good
+                
+                self._main_window.show_message(f"Redid copy of {copied_count} annotation(s) to next image")
+                return True
+        
+        # For other actions, use the model's redo method
+        success = self._annotation_model.redo()
+        if success:
+            # Auto-save after redo
+            self._annotation_controller.save_current_annotations()
+            self._main_window.show_message("Redo successful")
+        else:
+            self._main_window.show_message("Nothing to redo")
         
         return success
     

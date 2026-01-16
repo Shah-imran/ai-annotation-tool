@@ -24,6 +24,7 @@ class MainWindow(QMainWindow):
     preferences_requested = pyqtSignal()  # Emitted when preferences are requested
     load_settings_file = pyqtSignal(str)  # Emitted when user wants to load a settings file
     undo_requested = pyqtSignal()  # Emitted when undo is requested
+    redo_requested = pyqtSignal()  # Emitted when redo is requested
     window_closing = pyqtSignal()
     
     def __init__(self):
@@ -171,6 +172,12 @@ class MainWindow(QMainWindow):
         undo_action.setShortcut(QKeySequence.Undo)  # Ctrl+Z
         undo_action.triggered.connect(self.undo_requested.emit)
         edit_menu.addAction(undo_action)
+        
+        # Redo
+        redo_action = QAction('&Redo', self)
+        redo_action.setShortcut(QKeySequence.Redo)  # Ctrl+Shift+Z
+        redo_action.triggered.connect(self.redo_requested.emit)
+        edit_menu.addAction(redo_action)
         
         # Navigation menu
         nav_menu = menubar.addMenu('&Navigation')
@@ -322,7 +329,7 @@ class MainWindow(QMainWindow):
             self,
             "Select Class Names File",
             "",
-            "Text Files (*.txt);;Names Files (*.names);;All Files (*)"
+            "All Files (*)"
         )
         
         if file_path:

@@ -7,6 +7,7 @@
 Dataset/
 Classes/
 QAs/
+dist/
 .history/
 x64/Release/data/img/
 *.7z

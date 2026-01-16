@@ -147,21 +147,33 @@ class AnnotationModel(QObject):
         self.annotations_changed.emit()
         return index
     
-    def remove_annotation(self, index: int) -> bool:
+    def remove_annotation(self, index: int, record_undo: bool = True) -> bool:
         """
         Remove annotation at given index.
         
         Args:
             index: Index of annotation to remove
+            record_undo: Whether to record this action for undo
             
         Returns:
             bool: True if removed successfully
         """
         if 0 <= index < len(self._annotations):
+            removed_bbox = self._annotations[index].copy()
+            old_selected = self._selected_annotation_index
             self._annotations.pop(index)
+            
             # Adjust selected index
             if self._selected_annotation_index >= index:
                 self._selected_annotation_index = max(-1, self._selected_annotation_index - 1)
+            
+            # Record undo action
+            if record_undo:
+                self._undo_manager.push_action(
+                    ActionType.REMOVE_ANNOTATION,
+                    {"index": index, "bbox": removed_bbox, "old_selected": old_selected}
+                )
+            
             self.annotation_removed.emit(index)
             self.annotations_changed.emit()
             return True
@@ -393,4 +405,67 @@ class AnnotationModel(QObject):
     def can_undo(self) -> bool:
         """Check if there are actions to undo."""
         return self._undo_manager.can_undo()
+    
+    def redo(self) -> bool:
+        """
+        Redo the last undone action.
+        
+        Returns:
+            bool: True if an action was redone
+        """
+        action = self._undo_manager.pop_redo_action()
+        if not action:
+            return False
+        
+        if action.action_type == ActionType.ADD_ANNOTATION:
+            # Redo add: restore the annotation
+            index = action.data["index"]
+            bbox = action.data["bbox"]
+            
+            # Insert at original position
+            self._annotations.insert(index, bbox)
+            self._selected_annotation_index = index
+            self.annotation_added.emit(index)
+            self.annotations_changed.emit()
+            return True
+        
+        elif action.action_type == ActionType.REMOVE_ANNOTATION:
+            # Redo remove: remove the annotation again
+            index = action.data["index"]
+            if index < len(self._annotations):
+                self._annotations.pop(index)
+                if self._selected_annotation_index >= index:
+                    self._selected_annotation_index = max(-1, self._selected_annotation_index - 1)
+                self.annotation_removed.emit(index)
+                self.annotations_changed.emit()
+                return True
+        
+        elif action.action_type == ActionType.MODIFY_ANNOTATION:
+            # Redo modify: apply the new bbox again
+            index = action.data["index"]
+            new_bbox = action.data["new_bbox"]
+            
+            if 0 <= index < len(self._annotations):
+                self._annotations[index] = new_bbox
+                self.annotation_modified.emit(index)
+                self.annotations_changed.emit()
+                return True
+        
+        elif action.action_type == ActionType.CLEAR_ALL:
+            # Redo clear: clear all annotations again
+            self._annotations.clear()
+            self._selected_annotation_index = -1
+            self.annotations_changed.emit()
+            return True
+        
+        elif action.action_type == ActionType.COPY_BOXES_TO_NEXT:
+            # Redo copy: this is handled in main controller
+            # Just return True to indicate action was processed
+            return True
+        
+        return False
+    
+    def can_redo(self) -> bool:
+        """Check if there are actions to redo."""
+        return self._undo_manager.can_redo()
 

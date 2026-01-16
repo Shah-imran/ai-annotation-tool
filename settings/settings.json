@@ -18,7 +18,7 @@
   "max_recent_items": 5,
   "auto_load_last_session": true,
   "auto_save_interval": 30,
-  "qa_enabled": true,
+  "qa_enabled": false,
   "qa_questions_file": "D:/Research-work/Annotation-tool/QAs/sample_questions.json",
   "recent_qa_questions_files": [
     "D:/Research-work/Annotation-tool/QAs/sample_questions.json",
