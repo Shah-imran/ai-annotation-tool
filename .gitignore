@@ -1,0 +1,17 @@
+# Build files
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/cmake_install.cmake
+/yolo_mark
+Dataset/
+Classes/
+QAs/
+.history/
+x64/Release/data/img/
+*.7z
+*.zip
+x64/
+*.tiff
+*.npz
+*.npy
