@@ -4,11 +4,13 @@ Main window for the PyQt5 annotation tool.
 import os
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                             QSplitter, QMenuBar, QAction, QFileDialog, 
-                            QStatusBar, QMessageBox, QApplication)
+                            QStatusBar, QMessageBox, QApplication, QPushButton, QCheckBox, QLabel,
+                            QDialog, QDialogButtonBox, QLineEdit, QGridLayout)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QKeySequence, QIcon
 from .image_canvas import ImageCanvas
 from .control_panel import ControlPanel
+from .toggle_switch import ToggleSwitch
 
 
 class MainWindow(QMainWindow):
@@ -26,9 +28,12 @@ class MainWindow(QMainWindow):
     undo_requested = pyqtSignal()  # Emitted when undo is requested
     redo_requested = pyqtSignal()  # Emitted when redo is requested
     window_closing = pyqtSignal()
+    sidebar_width_changed = pyqtSignal(int)  # Emitted when sidebar width changes
+    convert_tiff_to_jpg_requested = pyqtSignal(str, str)  # input_dir, output_dir
     
     def __init__(self):
         super().__init__()
+        self._saved_sidebar_width = 0  # Store saved sidebar width
         self._setup_ui()
         self._setup_menu()
         self._setup_status_bar()
@@ -71,34 +76,76 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(5)
         
         # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
+        self.splitter = QSplitter(Qt.Horizontal)
         
         # Create image canvas
         self.image_canvas = ImageCanvas()
-        splitter.addWidget(self.image_canvas)
+        self.splitter.addWidget(self.image_canvas)
         
         # Connect canvas click to clear control panel focus
         self.image_canvas.canvas_clicked.connect(self._on_canvas_clicked)
         
         # Create control panel
         self.control_panel = ControlPanel()
-        splitter.addWidget(self.control_panel)
+        self.splitter.addWidget(self.control_panel)
         
-        # Set splitter proportions based on window size (70% canvas, 30% panel)
+        # Set splitter proportions - will be overridden by saved width if available
         canvas_size = int(window_width * 0.7)
         panel_size = int(window_width * 0.3)
-        splitter.setSizes([canvas_size, panel_size])
-        splitter.setStretchFactor(0, 2)  # Canvas can stretch more
-        splitter.setStretchFactor(1, 1)  # Control panel can also stretch
+        self.splitter.setSizes([canvas_size, panel_size])
+        self.splitter.setStretchFactor(0, 2)  # Canvas can stretch more
+        self.splitter.setStretchFactor(1, 1)  # Control panel can also stretch
         
-        main_layout.addWidget(splitter)
+        # Connect splitter to save sidebar width when resized
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+        
+        # Note: Saved sidebar width will be restored by controller after window is shown
+        
+        main_layout.addWidget(self.splitter)
         
         # Apply dark theme
         self._apply_dark_theme()
     
+    def resizeEvent(self, event):
+        """Handle window resize - enforce sidebar max width."""
+        super().resizeEvent(event)
+        # Check if sidebar exceeds 30% limit after window resize
+        sizes = self.splitter.sizes()
+        if len(sizes) > 1 and sizes[1] > 0:
+            max_panel_width = int(self.width() * 0.3)
+            if sizes[1] > max_panel_width:
+                # Adjust to respect the limit
+                canvas_size = self.width() - max_panel_width - self.splitter.handleWidth()
+                self.splitter.setSizes([canvas_size, max_panel_width])
+                self._saved_sidebar_width = max_panel_width
+                self.sidebar_width_changed.emit(max_panel_width)
+    
     def _setup_menu(self):
         """Setup the menu bar."""
         menubar = self.menuBar()
+        
+        # Add toggle switch to top right corner of menu bar
+        # Create a widget to hold the toggle
+        toggle_widget = QWidget()
+        toggle_layout = QHBoxLayout(toggle_widget)
+        toggle_layout.setContentsMargins(0, 0, 10, 0)
+        toggle_layout.setSpacing(5)
+        
+        # Label for the toggle
+        toggle_label = QLabel("Panel:")
+        toggle_label.setStyleSheet("color: #cccccc; font-size: 11px;")
+        toggle_layout.addWidget(toggle_label)
+        
+        # Toggle switch (custom widget)
+        self.panel_toggle_switch = ToggleSwitch()
+        self.panel_toggle_switch.setChecked(True)  # Panel is visible by default
+        self.panel_toggle_switch.setToolTip("Toggle control panel visibility")
+        self.panel_toggle_switch.toggled.connect(self._toggle_control_panel)
+        toggle_layout.addWidget(self.panel_toggle_switch)
+        toggle_layout.addStretch()
+        
+        # Add the widget to the menu bar
+        menubar.setCornerWidget(toggle_widget, Qt.TopRightCorner)
         
         # File menu
         file_menu = menubar.addMenu('&File')
@@ -175,7 +222,7 @@ class MainWindow(QMainWindow):
         
         # Redo
         redo_action = QAction('&Redo', self)
-        redo_action.setShortcut(QKeySequence.Redo)  # Ctrl+Shift+Z
+        redo_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))  # Explicitly set to Ctrl+Shift+Z
         redo_action.triggered.connect(self.redo_requested.emit)
         edit_menu.addAction(redo_action)
         
@@ -197,12 +244,28 @@ class MainWindow(QMainWindow):
         # Tools menu
         tools_menu = menubar.addMenu('&Tools')
         
+        # Toggle control panel visibility
+        self.toggle_panel_action = QAction('Toggle &Control Panel', self)
+        self.toggle_panel_action.setCheckable(True)
+        self.toggle_panel_action.setChecked(True)
+        self.toggle_panel_action.triggered.connect(lambda checked: self._toggle_control_panel(checked))
+        tools_menu.addAction(self.toggle_panel_action)
+        
+        tools_menu.addSeparator()
+        
         # Q&A toggle
         self.qa_toggle_action = QAction('Enable &Q&A Annotations', self)
         self.qa_toggle_action.setCheckable(True)
         self.qa_toggle_action.setChecked(False)
         self.qa_toggle_action.triggered.connect(self._toggle_qa_mode)
         tools_menu.addAction(self.qa_toggle_action)
+        
+        tools_menu.addSeparator()
+        
+        # TIFF to JPG conversion
+        convert_tiff_action = QAction('Convert &TIFF to JPG...', self)
+        convert_tiff_action.triggered.connect(self._show_tiff_to_jpg_dialog)
+        tools_menu.addAction(convert_tiff_action)
         
         tools_menu.addSeparator()
         
@@ -347,6 +410,91 @@ class MainWindow(QMainWindow):
         if file_path:
             self.load_settings_file.emit(file_path)
     
+    def _show_tiff_to_jpg_dialog(self):
+        """Show a popup dialog to select input and output folders for TIFF->JPG conversion."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Convert TIFF to JPG")
+        
+        layout = QVBoxLayout(dialog)
+        
+        info_label = QLabel("Select an input folder containing TIFF files and an output folder for JPG files.")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        grid = QGridLayout()
+        
+        # Input folder
+        input_label = QLabel("Input folder (TIFF):")
+        grid.addWidget(input_label, 0, 0)
+        
+        input_edit = QLineEdit()
+        input_edit.setReadOnly(True)
+        grid.addWidget(input_edit, 0, 1)
+        
+        input_browse = QPushButton("Browse...")
+        grid.addWidget(input_browse, 0, 2)
+        
+        # Output folder
+        output_label = QLabel("Output folder (JPG):")
+        grid.addWidget(output_label, 1, 0)
+        
+        output_edit = QLineEdit()
+        output_edit.setReadOnly(True)
+        grid.addWidget(output_edit, 1, 1)
+        
+        output_browse = QPushButton("Browse...")
+        grid.addWidget(output_browse, 1, 2)
+        
+        layout.addLayout(grid)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        
+        # Browse handlers
+        def _browse_input():
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select Input Folder (TIFF)",
+                "",
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+            )
+            if directory:
+                input_edit.setText(directory)
+        
+        def _browse_output():
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select Output Folder (JPG)",
+                "",
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+            )
+            if directory:
+                output_edit.setText(directory)
+        
+        input_browse.clicked.connect(_browse_input)
+        output_browse.clicked.connect(_browse_output)
+        
+        def _on_accept():
+            input_dir = input_edit.text().strip()
+            output_dir = output_edit.text().strip()
+            
+            if not input_dir or not output_dir:
+                QMessageBox.warning(
+                    self,
+                    "Missing Folders",
+                    "Please select both an input folder and an output folder."
+                )
+                return
+            
+            dialog.accept()
+            self.convert_tiff_to_jpg_requested.emit(input_dir, output_dir)
+        
+        buttons.accepted.connect(_on_accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        dialog.exec_()
+    
     def _show_about(self):
         """Show about dialog."""
         QMessageBox.about(
@@ -430,6 +578,91 @@ class MainWindow(QMainWindow):
     def _on_canvas_clicked(self):
         """Handle canvas click to clear focus from control panel."""
         self.control_panel.clear_text_focus()
+    
+    def _on_splitter_moved(self, pos: int, index: int):
+        """Handle splitter movement - save sidebar width and enforce max width."""
+        if index == 1:  # Panel is at index 1
+            sizes = self.splitter.sizes()
+            if len(sizes) > 1 and sizes[1] > 0:
+                # Enforce maximum width (30% of window width)
+                max_panel_width = int(self.width() * 0.3)
+                if sizes[1] > max_panel_width:
+                    # Adjust sizes to respect the limit
+                    canvas_size = self.width() - max_panel_width - self.splitter.handleWidth()
+                    self.splitter.setSizes([canvas_size, max_panel_width])
+                    self._saved_sidebar_width = max_panel_width
+                    self.sidebar_width_changed.emit(max_panel_width)
+                else:
+                    # Only save if panel is actually visible (size > 0)
+                    self._saved_sidebar_width = sizes[1]
+                    self.sidebar_width_changed.emit(sizes[1])
+    
+    def set_sidebar_width(self, width: int):
+        """Set the sidebar width (called from controller to restore saved width)."""
+        if width > 0:
+            # Enforce maximum width (30% of window width)
+            current_width = self.width() if self.width() > 0 else 1200
+            max_panel_width = int(current_width * 0.3)
+            width = min(width, max_panel_width)
+            
+            self._saved_sidebar_width = width
+            # Set the splitter sizes - calculate canvas size based on current window width
+            canvas_size = current_width - width - self.splitter.handleWidth()
+            if canvas_size > 0:
+                self.splitter.setSizes([canvas_size, width])
+    
+    def _toggle_control_panel(self, checked: bool = None):
+        """Toggle control panel visibility."""
+        # If called without argument, toggle current state
+        # Check actual visibility by checking splitter sizes, not just isVisible()
+        if checked is None:
+            current_sizes = self.splitter.sizes()
+            # Panel is visible if its size is greater than 0
+            panel_visible = len(current_sizes) > 1 and current_sizes[1] > 0
+            checked = not panel_visible
+        
+        # Block signals on all controls to prevent recursion
+        switch_blocked = False
+        action_blocked = False
+        
+        if hasattr(self, 'panel_toggle_switch'):
+            switch_blocked = self.panel_toggle_switch.signalsBlocked()
+            self.panel_toggle_switch.blockSignals(True)
+        if hasattr(self, 'toggle_panel_action'):
+            action_blocked = self.toggle_panel_action.signalsBlocked()
+            self.toggle_panel_action.blockSignals(True)
+        
+        try:
+            self.control_panel.setVisible(checked)
+            if checked:
+                # Restore splitter sizes - use saved width if available, otherwise default
+                max_panel_width = int(self.width() * 0.3)  # Maximum 30% of window
+                if self._saved_sidebar_width > 0:
+                    # Use saved width, but respect maximum
+                    panel_size = min(self._saved_sidebar_width, max_panel_width)
+                    canvas_size = self.width() - panel_size - self.splitter.handleWidth()
+                else:
+                    # Use default proportions (30% max)
+                    canvas_size = int(self.width() * 0.7)
+                    panel_size = max_panel_width
+                self.splitter.setSizes([canvas_size, panel_size])
+            else:
+                # Hide panel by setting its size to 0
+                self.splitter.setSizes([self.width(), 0])
+            
+            # Update menu action state
+            if hasattr(self, 'toggle_panel_action'):
+                self.toggle_panel_action.setChecked(checked)
+            
+            # Update toggle switch state
+            if hasattr(self, 'panel_toggle_switch'):
+                self.panel_toggle_switch.setChecked(checked)
+        finally:
+            # Always unblock signals (restore previous state)
+            if hasattr(self, 'panel_toggle_switch'):
+                self.panel_toggle_switch.blockSignals(switch_blocked)
+            if hasattr(self, 'toggle_panel_action'):
+                self.toggle_panel_action.blockSignals(action_blocked)
     
     def _handle_class_shortcut(self, class_id: int):
         """Handle class selection shortcut, but ignore if text box has focus."""

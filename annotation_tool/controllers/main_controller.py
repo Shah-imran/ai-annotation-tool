@@ -3,11 +3,166 @@ Main controller orchestrating the entire application.
 """
 import os
 from typing import Optional
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, pyqtSignal, QThread, Qt
+from PyQt5.QtWidgets import QProgressDialog
+from PIL import Image
 from ..models import ImageModel, AnnotationModel, SettingsModel, QuestionsModel, QAAnswersModel
 from ..views import MainWindow
 from ..views.preferences_dialog import PreferencesDialog
 from .annotation_controller import AnnotationController
+
+
+class _TiffToJpgWorker(QObject):
+    """Background worker to convert TIFF files to JPG without blocking the UI."""
+    
+    progress = pyqtSignal(int, int)  # completed, total
+    finished = pyqtSignal(int, int, int, bool)  # converted, errors, total, cancelled
+    
+    def __init__(self, files, output_dir: str):
+        super().__init__()
+        self._files = list(files)
+        self._output_dir = output_dir
+        self._cancelled = False
+    
+    def cancel(self):
+        """Request cancellation."""
+        self._cancelled = True
+    
+    def run(self):
+        """Run the conversion loop in a background thread."""
+        total = len(self._files)
+        converted = 0
+        errors = 0
+        
+        for idx, src_path in enumerate(self._files, start=1):
+            if self._cancelled:
+                break
+            
+            try:
+                with Image.open(src_path) as img:
+                    # Use first frame and convert to RGB for JPEG
+                    try:
+                        img.seek(0)
+                    except Exception:
+                        # Some images may not be multi-frame; ignore
+                        pass
+                    rgb = img.convert("RGB")
+                    
+                    base_name = os.path.splitext(os.path.basename(src_path))[0]
+                    dst_path = os.path.join(self._output_dir, base_name + ".jpg")
+                    
+                    rgb.save(dst_path, "JPEG", quality=95)
+                    converted += 1
+            except Exception as e:
+                errors += 1
+                print(f"Error converting {src_path} to JPG: {e}")
+            
+            self.progress.emit(idx, total)
+        
+        self.finished.emit(converted, errors, total, self._cancelled)
+
+
+class _ExportAnnotationsWorker(QObject):
+    """Background worker to export annotations without blocking the UI."""
+    
+    progress = pyqtSignal(int, int)  # completed, total
+    finished = pyqtSignal(bool, int, str)  # success, count, error_message
+    
+    def __init__(self, image_files, export_path: str):
+        super().__init__()
+        self._image_files = list(image_files)
+        self._export_path = export_path
+        self._cancelled = False
+    
+    def cancel(self):
+        self._cancelled = True
+    
+    def run(self):
+        import json
+        
+        all_annotations = []
+        total = len(self._image_files)
+        
+        try:
+            for idx, image_path in enumerate(self._image_files, start=1):
+                if self._cancelled:
+                    # Treat as successful but with partial data; controller can decide messaging.
+                    break
+                
+                annotation_path = os.path.splitext(image_path)[0] + ".txt"
+                if os.path.exists(annotation_path):
+                    try:
+                        with open(annotation_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                        for line in lines:
+                            all_annotations.append({
+                                'image': image_path,
+                                'annotation': line.strip()
+                            })
+                    except Exception as e:
+                        print(f"Error reading {annotation_path} during export: {e}")
+                
+                self.progress.emit(idx, total)
+            
+            # Write out the collected annotations
+            with open(self._export_path, 'w', encoding='utf-8') as f:
+                json.dump(all_annotations, f, indent=2)
+            
+            self.finished.emit(True, len(all_annotations), "")
+        except Exception as e:
+            self.finished.emit(False, 0, str(e))
+
+
+class _ImportAnnotationsWorker(QObject):
+    """Background worker to import annotations without blocking the UI."""
+    
+    progress = pyqtSignal(int, int)  # completed, total
+    finished = pyqtSignal(bool, int, str)  # success, count, error_message
+    
+    def __init__(self, import_path: str):
+        super().__init__()
+        self._import_path = import_path
+        self._cancelled = False
+    
+    def cancel(self):
+        self._cancelled = True
+    
+    def run(self):
+        import json
+        
+        try:
+            with open(self._import_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            self.finished.emit(False, 0, f"Failed to read import file: {e}")
+            return
+        
+        total = len(data)
+        imported_count = 0
+        
+        try:
+            for idx, item in enumerate(data, start=1):
+                if self._cancelled:
+                    break
+                
+                try:
+                    image_path = item['image']
+                    annotation_line = item['annotation']
+                    annotation_path = os.path.splitext(image_path)[0] + ".txt"
+                    
+                    # Append to existing annotations
+                    with open(annotation_path, 'a', encoding='utf-8') as f:
+                        f.write(annotation_line + '\n')
+                    
+                    imported_count += 1
+                except Exception as e:
+                    print(f"Error importing annotation for {item.get('image')}: {e}")
+                
+                self.progress.emit(idx, total)
+            
+            self.finished.emit(True, imported_count, "")
+        except Exception as e:
+            self.finished.emit(False, imported_count, str(e))
 
 
 class MainController(QObject):
@@ -47,6 +202,9 @@ class MainController(QObject):
         # Initialize Q&A system
         self._initialize_qa_system()
         
+        # Initialize control panel with settings
+        self._main_window.control_panel.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
+        
         # Show settings path (for debugging)
         print(f"Settings saved to: {self._settings_model.get_settings_file_path()}")
     
@@ -61,9 +219,11 @@ class MainController(QObject):
         self._main_window.load_images_from_file_list.connect(self._on_load_images_from_file_list)
         self._main_window.load_class_names.connect(self._on_load_class_names)
         self._main_window.load_settings_file.connect(self._on_load_settings_file)
+        self._main_window.convert_tiff_to_jpg_requested.connect(self._on_convert_tiff_to_jpg)
         self._main_window.qa_mode_toggled.connect(self._on_qa_mode_toggled)
         self._main_window.preferences_requested.connect(self._on_preferences_requested)
         self._main_window.window_closing.connect(self.save_window_state)
+        self._main_window.sidebar_width_changed.connect(self._on_sidebar_width_changed)
         
         # Settings model signals
         self._settings_model.settings_loaded_from_file.connect(self._on_settings_loaded)
@@ -71,10 +231,13 @@ class MainController(QObject):
         # Control panel signals
         self._main_window.control_panel.next_image_requested.connect(self._on_next_image_requested)
         self._main_window.control_panel.previous_image_requested.connect(self._on_previous_image_requested)
+        self._main_window.control_panel.image_index_requested.connect(self._on_image_index_requested)
         self._main_window.control_panel.save_requested.connect(self._on_save_requested)
         self._main_window.control_panel.load_images_requested.connect(self._on_load_images_dialog)
         self._main_window.control_panel.load_classes_requested.connect(self._on_load_classes_dialog)
         self._main_window.control_panel.copy_boxes_to_next_requested.connect(self._on_copy_boxes_to_next_requested)
+        self._main_window.control_panel.copy_boxes_count_changed.connect(self._on_copy_boxes_count_changed)
+        self._main_window.control_panel.toggle_panel_requested.connect(self._on_toggle_panel_requested)
         self._main_window.undo_requested.connect(self._on_undo_requested)
         self._main_window.redo_requested.connect(self._on_redo_requested)
         self._main_window.control_panel.qa_answer_changed.connect(self._on_qa_answer_changed)
@@ -106,7 +269,16 @@ class MainController(QObject):
         height = max(height, 700)
         
         self._main_window.setGeometry(x, y, width, height)
+        
+        # Show window first so it has proper dimensions
         self._main_window.show()
+        
+        # Restore sidebar width if saved (after window is shown so dimensions are correct)
+        saved_width = self._settings_model.get_sidebar_width()
+        if saved_width > 0:
+            # Use QTimer to ensure window is fully rendered before setting splitter sizes
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(100, lambda: self._main_window.set_sidebar_width(saved_width))
     
     def _on_current_image_changed(self, index: int, image_path: str):
         """Handle current image changed."""
@@ -169,6 +341,96 @@ class MainController(QObject):
                 f"Failed to load images from file: {file_path}"
             )
     
+    def _on_convert_tiff_to_jpg(self, input_dir: str, output_dir: str):
+        """Handle TIFF to JPG conversion request using a background thread and progress dialog."""
+        if not os.path.isdir(input_dir):
+            self._main_window.show_error("Invalid Input Folder", f"Input folder does not exist:\n{input_dir}")
+            return
+        
+        if not os.path.isdir(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except Exception as e:
+                self._main_window.show_error("Invalid Output Folder", f"Cannot create output folder:\n{output_dir}\n\n{e}")
+                return
+        
+        # Find TIFF files (.tif, .tiff)
+        tiff_files = []
+        for name in os.listdir(input_dir):
+            lower = name.lower()
+            if lower.endswith(".tif") or lower.endswith(".tiff"):
+                tiff_files.append(os.path.join(input_dir, name))
+        
+        if not tiff_files:
+            self._main_window.show_message("No TIFF files found in the selected input folder", 5000)
+            return
+        
+        total = len(tiff_files)
+        
+        # Set up progress dialog
+        progress = QProgressDialog(
+            "Converting TIFF to JPG...",
+            "Cancel",
+            0,
+            total,
+            self._main_window
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowTitle("TIFF to JPG Conversion")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        
+        # Create worker and thread
+        worker = _TiffToJpgWorker(tiff_files, output_dir)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        
+        # Keep references to prevent garbage collection
+        self._tiff_thread = thread
+        self._tiff_worker = worker
+        self._tiff_progress = progress
+        
+        # Wire up signals
+        def on_progress(done: int, total_files: int):
+            progress.setMaximum(total_files)
+            progress.setValue(done)
+        
+        def on_finished(converted: int, errors: int, total_files: int, cancelled: bool):
+            progress.close()
+            
+            if cancelled:
+                msg = f"Conversion cancelled after {converted} of {total_files} file(s) converted"
+                if errors:
+                    msg += f" (with {errors} error(s) – see console for details)"
+                self._main_window.show_warning("Conversion Cancelled", msg)
+            elif converted > 0:
+                msg = f"Converted {converted} TIFF file(s) to JPG"
+                if errors:
+                    msg += f" (with {errors} error(s) – see console for details)"
+                self._main_window.show_message(msg, 8000)
+            else:
+                self._main_window.show_error("Conversion Failed", "No TIFF files could be converted to JPG.")
+            
+            thread.quit()
+            thread.wait()
+            worker.deleteLater()
+            thread.deleteLater()
+            self._tiff_thread = None
+            self._tiff_worker = None
+            self._tiff_progress = None
+        
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        thread.started.connect(worker.run)
+        
+        def on_cancel():
+            worker.cancel()
+        
+        progress.canceled.connect(on_cancel)
+        
+        # Start background conversion
+        thread.start()
+    
     def _on_load_class_names(self, file_path: str):
         """Handle load class names request."""
         success = self._annotation_controller.load_class_names(file_path)
@@ -192,6 +454,14 @@ class MainController(QObject):
         if not self._image_model.previous_image():
             self._main_window.show_message("Already at first image")
     
+    def _on_image_index_requested(self, index: int):
+        """Handle image index request from slider."""
+        if self._image_model.set_current_index(index):
+            # Image change will be handled by the current_image_changed signal
+            pass
+        else:
+            self._main_window.show_message(f"Invalid image index: {index}")
+    
     def _on_save_requested(self):
         """Handle save request."""
         success = self._annotation_controller.save_current_annotations()
@@ -206,10 +476,20 @@ class MainController(QObject):
             self._main_window.show_message("No images loaded")
             return
         
-        # Check if we're not at the last image
-        if self._image_model.current_index >= self._image_model.total_images - 1:
+        # Get copy count from settings
+        copy_count = self._settings_model.get_copy_boxes_count()
+        
+        # Check if we have enough images ahead
+        current_index = self._image_model.current_index
+        max_available = self._image_model.total_images - current_index - 1
+        if max_available <= 0:
             self._main_window.show_message("Already at last image - cannot copy to next")
             return
+        
+        # Limit copy_count to available images
+        if copy_count > max_available:
+            self._main_window.show_message(f"Only {max_available} image(s) available, copying to {max_available} image(s)")
+            copy_count = max_available
         
         # Get current annotations
         current_annotations = self._annotation_model.annotations
@@ -217,41 +497,121 @@ class MainController(QObject):
             self._main_window.show_message("No annotations to copy")
             return
         
+        # Show dialog to select boxes
+        from ..views.box_selection_dialog import BoxSelectionDialog
+        from PyQt5.QtWidgets import QDialog
+        dialog = BoxSelectionDialog(
+            current_annotations,
+            self._annotation_model.class_names,
+            self._main_window
+        )
+        
+        # Connect dialog signals to canvas for visual feedback
+        def on_selection_changed(selected_indices):
+            """Update canvas highlights when selection changes."""
+            self._main_window.image_canvas.set_highlighted_indices(selected_indices)
+        
+        def on_checkbox_hovered(index, is_entering):
+            """Highlight individual box on hover."""
+            if is_entering:
+                # Show just this box highlighted
+                self._main_window.image_canvas.set_highlighted_indices({index})
+            else:
+                # Return to showing all selected boxes
+                selected_indices = dialog.get_selected_indices()
+                self._main_window.image_canvas.set_highlighted_indices(set(selected_indices))
+        
+        dialog.selection_changed.connect(on_selection_changed)
+        dialog.checkbox_hovered.connect(on_checkbox_hovered)
+        
+        # Show dialog and check if user clicked OK
+        result = dialog.exec_()
+        
+        # Clear highlights when dialog closes
+        self._main_window.image_canvas.clear_highlights()
+        
+        if result != QDialog.Accepted:
+            return  # User cancelled
+        
+        # Get selected annotations
+        selected_annotations = dialog.get_selected_annotations()
+        if not selected_annotations:
+            self._main_window.show_message("No boxes selected")
+            return
+        
         # Save current annotations first
         self._annotation_controller.save_current_annotations()
         
-        # Get next image path
-        next_index = self._image_model.current_index + 1
-        next_image_path = self._image_model.image_files[next_index]
-        
-        # Get next image's annotation path
         import os
-        next_annotation_path = os.path.splitext(next_image_path)[0] + ".txt"
+        current_image_path = self._image_model.current_image_path
+        copied_images = []
+        total_copied_count = 0
         
-        # Load next image's existing annotations (if any)
-        self._annotation_model.load_annotations(next_annotation_path)
+        # Copy to N images
+        from PyQt5.QtWidgets import QProgressDialog
+        from PyQt5.QtCore import QCoreApplication
         
-        # Save original annotations from next image for undo
-        original_next_annotations = [bbox.copy() for bbox in self._annotation_model.annotations]
+        progress = QProgressDialog(
+            "Copying boxes to next images...",
+            "Cancel",
+            0,
+            copy_count,
+            self._main_window
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowTitle("Copy Boxes")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
         
-        # Copy all boxes from current image (don't record undo for individual adds)
-        copied_count = 0
-        for bbox in current_annotations:
-            # Create a copy of the bounding box
-            copied_bbox = bbox.copy()
-            # Add to annotations (don't record undo for individual adds - we'll record the whole operation)
-            self._annotation_model.add_annotation(copied_bbox, record_undo=False)
-            copied_count += 1
+        for i in range(1, copy_count + 1):
+            target_index = current_index + i
+            if target_index >= self._image_model.total_images:
+                break
+            
+            # Get target image path from the list
+            image_files = self._image_model.image_files
+            if target_index >= len(image_files):
+                break
+            
+            target_image_path = image_files[target_index]
+            target_annotation_path = os.path.splitext(target_image_path)[0] + ".txt"
+            
+            # Load target image's existing annotations (if any)
+            self._annotation_model.load_annotations(target_annotation_path)
+            
+            # Save original annotations from target image for undo
+            original_annotations = [bbox.copy() for bbox in self._annotation_model.annotations]
+            
+            # Copy only selected boxes from current image (don't record undo for individual adds)
+            for bbox in selected_annotations:
+                # Create a copy of the bounding box
+                copied_bbox = bbox.copy()
+                # Add to annotations (don't record undo for individual adds - we'll record the whole operation)
+                self._annotation_model.add_annotation(copied_bbox, record_undo=False)
+                total_copied_count += 1
+            
+            # Save the target image's annotations with copied boxes
+            success = self._annotation_model.save_annotations(target_annotation_path)
+            
+            if not success:
+                self._main_window.show_error("Error", f"Failed to save copied annotations to image {i}")
+                continue
+            
+            copied_images.append({
+                "image_path": target_image_path,
+                "annotation_path": target_annotation_path,
+                "original_annotations": original_annotations
+            })
+            
+            # Update progress
+            progress.setValue(i)
+            QCoreApplication.processEvents()
+            if progress.wasCanceled():
+                break
         
-        # Save the next image's annotations with copied boxes
-        success = self._annotation_model.save_annotations(next_annotation_path)
-        
-        if not success:
-            self._main_window.show_error("Error", "Failed to save copied annotations")
-            return
+        progress.close()
         
         # Reload current image's annotations to restore state
-        current_image_path = self._image_model.current_image_path
         self._annotation_controller.load_image_annotations(current_image_path)
         
         # Record undo action for copy operation
@@ -260,14 +620,13 @@ class MainController(QObject):
             ActionType.COPY_BOXES_TO_NEXT,
             {
                 "current_image_path": current_image_path,
-                "next_image_path": next_image_path,
-                "copied_count": copied_count,
-                "next_image_original_annotations": original_next_annotations
+                "copied_images": copied_images,
+                "copied_count": total_copied_count
             }
         )
         
         # Show success message
-        self._main_window.show_message(f"Copied {copied_count} annotation(s) to next image")
+        self._main_window.show_message(f"Copied {len(selected_annotations)} annotation(s) to {len(copied_images)} image(s)")
     
     def _on_annotation_saved(self):
         """Handle annotation saved."""
@@ -323,26 +682,61 @@ class MainController(QObject):
         """
         try:
             image_files = self._image_model.image_files
-            all_annotations = []
+            total = len(image_files)
+            if total == 0:
+                self._main_window.show_message("No images loaded to export annotations from")
+                return False
             
-            for image_path in image_files:
-                annotation_path = os.path.splitext(image_path)[0] + ".txt"
-                if os.path.exists(annotation_path):
-                    with open(annotation_path, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                    
-                    for line in lines:
-                        all_annotations.append({
-                            'image': image_path,
-                            'annotation': line.strip()
-                        })
+            progress = QProgressDialog(
+                "Exporting annotations...",
+                "Cancel",
+                0,
+                total,
+                self._main_window
+            )
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle("Export Annotations")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
             
-            # Export to JSON or other format
-            import json
-            with open(export_path, 'w', encoding='utf-8') as f:
-                json.dump(all_annotations, f, indent=2)
+            worker = _ExportAnnotationsWorker(image_files, export_path)
+            thread = QThread(self)
+            worker.moveToThread(thread)
             
-            self._main_window.show_message(f"Exported {len(all_annotations)} annotations")
+            self._export_thread = thread
+            self._export_worker = worker
+            self._export_progress = progress
+            
+            def on_progress(done: int, total_files: int):
+                progress.setMaximum(total_files)
+                progress.setValue(done)
+            
+            def on_finished(success: bool, count: int, error_message: str):
+                progress.close()
+                
+                if success:
+                    self._main_window.show_message(f"Exported {count} annotations")
+                else:
+                    self._main_window.show_error("Export Error", f"Failed to export annotations: {error_message}")
+                
+                thread.quit()
+                thread.wait()
+                worker.deleteLater()
+                thread.deleteLater()
+                self._export_thread = None
+                self._export_worker = None
+                self._export_progress = None
+            
+            worker.progress.connect(on_progress)
+            worker.finished.connect(on_finished)
+            thread.started.connect(worker.run)
+            
+            def on_cancel():
+                worker.cancel()
+            
+            progress.canceled.connect(on_cancel)
+            
+            thread.start()
             return True
             
         except Exception as e:
@@ -360,29 +754,67 @@ class MainController(QObject):
             bool: True if imported successfully
         """
         try:
-            import json
-            with open(import_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            if not os.path.exists(import_path):
+                self._main_window.show_error("Import Error", f"Import file does not exist:\n{import_path}")
+                return False
             
-            imported_count = 0
-            for item in data:
-                image_path = item['image']
-                annotation_line = item['annotation']
-                
-                annotation_path = os.path.splitext(image_path)[0] + ".txt"
-                
-                # Append to existing annotations
-                with open(annotation_path, 'a', encoding='utf-8') as f:
-                    f.write(annotation_line + '\n')
-                
-                imported_count += 1
+            # We don't know the total count yet without reading the file, so let the worker handle it
+            worker = _ImportAnnotationsWorker(import_path)
+            thread = QThread(self)
+            worker.moveToThread(thread)
             
-            # Reload current image annotations if any
-            current_image = self._image_model.current_image_path
-            if current_image:
-                self._annotation_controller.load_image_annotations(current_image)
+            # Temporary progress dialog; maximum will be updated once we know total
+            progress = QProgressDialog(
+                "Importing annotations...",
+                "Cancel",
+                0,
+                0,
+                self._main_window
+            )
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle("Import Annotations")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
             
-            self._main_window.show_message(f"Imported {imported_count} annotations")
+            self._import_thread = thread
+            self._import_worker = worker
+            self._import_progress = progress
+            
+            def on_progress(done: int, total_items: int):
+                progress.setMaximum(total_items)
+                progress.setValue(done)
+            
+            def on_finished(success: bool, count: int, error_message: str):
+                progress.close()
+                
+                if success:
+                    # Reload current image annotations if any
+                    current_image = self._image_model.current_image_path
+                    if current_image:
+                        self._annotation_controller.load_image_annotations(current_image)
+                    
+                    self._main_window.show_message(f"Imported {count} annotations")
+                else:
+                    self._main_window.show_error("Import Error", f"Failed to import annotations: {error_message}")
+                
+                thread.quit()
+                thread.wait()
+                worker.deleteLater()
+                thread.deleteLater()
+                self._import_thread = None
+                self._import_worker = None
+                self._import_progress = None
+            
+            worker.progress.connect(on_progress)
+            worker.finished.connect(on_finished)
+            thread.started.connect(worker.run)
+            
+            def on_cancel():
+                worker.cancel()
+            
+            progress.canceled.connect(on_cancel)
+            
+            thread.start()
             return True
             
         except Exception as e:
@@ -487,6 +919,7 @@ class MainController(QObject):
             self._preferences_dialog.auto_load_session_changed.connect(self._on_auto_load_session_changed)
             self._preferences_dialog.auto_save_interval_changed.connect(self._on_auto_save_interval_changed)
             self._preferences_dialog.max_recent_items_changed.connect(self._on_max_recent_items_changed)
+            self._preferences_dialog.copy_boxes_count_changed.connect(self._on_copy_boxes_count_changed)
             self._preferences_dialog.settings_file_path_changed.connect(self._on_settings_file_path_changed)
         
         # Set current values
@@ -502,7 +935,11 @@ class MainController(QObject):
         self._preferences_dialog.set_auto_load_session(self._settings_model.get_auto_load_last_session())
         self._preferences_dialog.set_auto_save_interval(self._settings_model.get_auto_save_interval())
         self._preferences_dialog.set_max_recent_items(self._settings_model.get_max_recent_items())
+        self._preferences_dialog.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
         self._preferences_dialog.set_settings_file_path(self._settings_model.get_settings_file_path())
+        
+        # Set control panel value
+        self._main_window.control_panel.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
         
         # Show dialog
         self._preferences_dialog.exec_()
@@ -563,6 +1000,23 @@ class MainController(QObject):
         self._settings_model.set_max_recent_items(max_items)
         self._main_window.show_message(f"Maximum recent items set to {max_items}")
     
+    def _on_copy_boxes_count_changed(self, count: int):
+        """Handle copy boxes count preference change."""
+        self._settings_model.set_copy_boxes_count(count)
+        # Sync control panel value
+        self._main_window.control_panel.set_copy_boxes_count(count)
+        self._main_window.show_message(f"Copy boxes count set to: {count}")
+    
+    def _on_toggle_panel_requested(self):
+        """Handle toggle panel request from control panel button."""
+        # Toggle the current state
+        current_state = self._main_window.control_panel.isVisible()
+        self._main_window._toggle_control_panel(not current_state)
+    
+    def _on_sidebar_width_changed(self, width: int):
+        """Handle sidebar width change - save to settings."""
+        self._settings_model.set_sidebar_width(width)
+    
     def _on_undo_requested(self):
         """Handle undo request."""
         # Check if we can undo
@@ -584,48 +1038,51 @@ class MainController(QObject):
                 action = undo_manager.pop_action()
                 data = action.data
                 
-                # Restore next image's original annotations
-                next_image_path = data["next_image_path"]
-                original_annotations = data["next_image_original_annotations"]
                 current_image_path = data["current_image_path"]
+                copied_images = data.get("copied_images", [])
                 
                 # Save current image first
                 self._annotation_controller.save_current_annotations()
                 
-                # Get next image index
-                next_index = None
-                for i, img_path in enumerate(self._image_model.image_files):
-                    if img_path == next_image_path:
-                        next_index = i
-                        break
-                
-                if next_index is not None and next_index < self._image_model.total_images:
-                    # Load next image
-                    self._image_model.set_current_index(next_index)
-                    self._annotation_controller.load_image_annotations(next_image_path)
+                import os
+                # Restore original annotations for all copied images
+                for img_data in copied_images:
+                    target_image_path = img_data["image_path"]
+                    target_annotation_path = img_data["annotation_path"]
+                    original_annotations = img_data["original_annotations"]
                     
-                    # Restore original annotations (don't record undo for this)
-                    self._annotation_model._annotations = [bbox.copy() for bbox in original_annotations]
-                    self._annotation_model.annotations_changed.emit()
-                    
-                    # Save next image
-                    import os
-                    next_annotation_path = os.path.splitext(next_image_path)[0] + ".txt"
-                    self._annotation_model.save_annotations(next_annotation_path)
-                    
-                    # Reload current image
-                    current_index = None
+                    # Get target image index
+                    target_index = None
                     for i, img_path in enumerate(self._image_model.image_files):
-                        if img_path == current_image_path:
-                            current_index = i
+                        if img_path == target_image_path:
+                            target_index = i
                             break
                     
-                    if current_index is not None:
-                        self._image_model.set_current_index(current_index)
-                        self._annotation_controller.load_image_annotations(current_image_path)
-                    
-                    self._main_window.show_message(f"Undid copy of {data['copied_count']} annotation(s)")
-                    return True
+                    if target_index is not None and target_index < self._image_model.total_images:
+                        # Load target image
+                        self._image_model.set_current_index(target_index)
+                        self._annotation_controller.load_image_annotations(target_image_path)
+                        
+                        # Restore original annotations (don't record undo for this)
+                        self._annotation_model._annotations = [bbox.copy() for bbox in original_annotations]
+                        self._annotation_model.annotations_changed.emit()
+                        
+                        # Save target image
+                        self._annotation_model.save_annotations(target_annotation_path)
+                
+                # Reload current image
+                current_index = None
+                for i, img_path in enumerate(self._image_model.image_files):
+                    if img_path == current_image_path:
+                        current_index = i
+                        break
+                
+                if current_index is not None:
+                    self._image_model.set_current_index(current_index)
+                    self._annotation_controller.load_image_annotations(current_image_path)
+                
+                self._main_window.show_message(f"Undid copy to {len(copied_images)} image(s)")
+                return True
         
         # For other actions, use the model's undo method
         success = self._annotation_model.undo()
@@ -661,8 +1118,7 @@ class MainController(QObject):
                 
                 # Re-execute the copy operation
                 current_image_path = data["current_image_path"]
-                next_image_path = data["next_image_path"]
-                copied_count = data["copied_count"]
+                copied_images = data.get("copied_images", [])
                 
                 # Get current image index to reload annotations
                 current_index = None
@@ -683,34 +1139,27 @@ class MainController(QObject):
                 # Save current annotations first
                 self._annotation_controller.save_current_annotations()
                 
-                # Get next image's annotation path
                 import os
-                next_annotation_path = os.path.splitext(next_image_path)[0] + ".txt"
-                
-                # Load next image's existing annotations (if any)
-                self._annotation_model.load_annotations(next_annotation_path)
-                
-                # Copy all boxes from current image (don't record undo for individual adds)
-                for bbox in current_annotations:
-                    copied_bbox = bbox.copy()
-                    self._annotation_model.add_annotation(copied_bbox, record_undo=False)
-                
-                # Save the next image's annotations with copied boxes
-                success = self._annotation_model.save_annotations(next_annotation_path)
-                
-                if not success:
-                    self._main_window.show_error("Error", "Failed to save copied annotations")
-                    return False
+                # Copy to all target images again
+                for img_data in copied_images:
+                    target_image_path = img_data["image_path"]
+                    target_annotation_path = img_data["annotation_path"]
+                    
+                    # Load target image's existing annotations
+                    self._annotation_model.load_annotations(target_annotation_path)
+                    
+                    # Copy all boxes from current image
+                    for bbox in current_annotations:
+                        copied_bbox = bbox.copy()
+                        self._annotation_model.add_annotation(copied_bbox, record_undo=False)
+                    
+                    # Save the target image's annotations
+                    self._annotation_model.save_annotations(target_annotation_path)
                 
                 # Reload current image's annotations to restore state
-                self._image_model.set_current_index(current_index)
                 self._annotation_controller.load_image_annotations(current_image_path)
                 
-                # The action is already back in undo stack (via pop_redo_action)
-                # But we need to push it again since we re-executed it
-                # Actually, pop_redo_action already moved it back to undo, so we're good
-                
-                self._main_window.show_message(f"Redid copy of {copied_count} annotation(s) to next image")
+                self._main_window.show_message(f"Redid copy to {len(copied_images)} image(s)")
                 return True
         
         # For other actions, use the model's redo method

@@ -5,8 +5,9 @@ from typing import List, Optional, Dict, Any
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                             QLineEdit, QPushButton, QListWidget, QListWidgetItem,
                             QComboBox, QSpinBox, QTextEdit, QGroupBox, QGridLayout,
-                            QProgressBar, QSplitter, QScrollArea, QCheckBox, QFrame)
-from PyQt5.QtCore import Qt, pyqtSignal
+                            QProgressBar, QSplitter, QScrollArea, QCheckBox, QFrame,
+                            QSlider)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QKeySequence
 
 
@@ -22,11 +23,14 @@ class ControlPanel(QWidget):
     clear_all_requested = pyqtSignal()
     next_image_requested = pyqtSignal()
     previous_image_requested = pyqtSignal()
+    image_index_requested = pyqtSignal(int)  # Request to navigate to specific image index
     load_images_requested = pyqtSignal()
     load_classes_requested = pyqtSignal()
     save_requested = pyqtSignal()
     copy_boxes_to_next_requested = pyqtSignal()  # Copy all boxes to next image
+    copy_boxes_count_changed = pyqtSignal(int)  # Number of images to copy to
     qa_answer_changed = pyqtSignal(str, str)  # question, answer
+    toggle_panel_requested = pyqtSignal()  # Request to toggle panel visibility
     
     def __init__(self):
         super().__init__()
@@ -42,6 +46,7 @@ class ControlPanel(QWidget):
     def _setup_ui(self):
         """Initialize the UI components."""
         # Make control panel resizable with minimum width only
+        # Maximum width will be enforced by the splitter handler in main window
         self.setMinimumWidth(250)
         self.setStyleSheet("""
             QGroupBox {
@@ -143,15 +148,32 @@ class ControlPanel(QWidget):
         group = QGroupBox("Navigation")
         layout = QVBoxLayout(group)
         
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
         # Image counter
         self.image_counter_label = QLabel("No images loaded")
         self.image_counter_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.image_counter_label)
+        
+        # Draggable slider for image navigation
+        self.image_slider = QSlider(Qt.Horizontal)
+        self.image_slider.setMinimum(0)
+        self.image_slider.setMaximum(0)
+        self.image_slider.setValue(0)
+        self.image_slider.setVisible(False)
+        self.image_slider.setTickPosition(QSlider.NoTicks)
+        self.image_slider.valueChanged.connect(self._on_slider_value_changed)
+        self.image_slider.sliderPressed.connect(self._on_slider_pressed)
+        self.image_slider.sliderReleased.connect(self._on_slider_released)
+        layout.addWidget(self.image_slider)
+        
+        # Flag to prevent recursive updates when programmatically setting slider value
+        self._updating_slider = False
+        
+        # Debouncing timer for slider - wait for user to slow down before changing images
+        self._slider_debounce_timer = QTimer()
+        self._slider_debounce_timer.setSingleShot(True)
+        self._slider_debounce_timer.timeout.connect(self._on_slider_debounce_timeout)
+        self._pending_image_index = None
+        self._is_dragging = False
         
         # Navigation buttons
         nav_layout = QHBoxLayout()
@@ -167,6 +189,22 @@ class ControlPanel(QWidget):
         nav_layout.addWidget(self.next_btn)
         
         layout.addLayout(nav_layout)
+        
+        # Copy boxes count control
+        copy_boxes_layout = QHBoxLayout()
+        copy_boxes_label = QLabel("Copy to next:")
+        copy_boxes_layout.addWidget(copy_boxes_label)
+        
+        self.copy_boxes_spinbox = QSpinBox()
+        self.copy_boxes_spinbox.setMinimum(1)
+        self.copy_boxes_spinbox.setMaximum(2147483647)  # Maximum 32-bit integer value
+        self.copy_boxes_spinbox.setValue(1)
+        self.copy_boxes_spinbox.setToolTip("Number of images to copy boxes to when using Ctrl+C")
+        self.copy_boxes_spinbox.valueChanged.connect(self.copy_boxes_count_changed.emit)
+        copy_boxes_layout.addWidget(self.copy_boxes_spinbox)
+        
+        copy_boxes_layout.addStretch()
+        layout.addLayout(copy_boxes_layout)
         
         parent_layout.addWidget(group)
     
@@ -417,18 +455,74 @@ Mouse Controls:
         """Update image counter display."""
         if total > 0:
             self.image_counter_label.setText(f"Image {current + 1} of {total}")
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setMaximum(total)
-            self.progress_bar.setValue(current + 1)
+            # Cancel any pending debounce timer since we're updating programmatically
+            self._slider_debounce_timer.stop()
+            self._pending_image_index = None
+            # Update slider
+            self._updating_slider = True
+            self.image_slider.setMaximum(max(0, total - 1))  # Slider is 0-indexed
+            self.image_slider.setValue(current)
+            self.image_slider.setVisible(True)
+            self._updating_slider = False
             self.prev_btn.setEnabled(True)
             self.next_btn.setEnabled(True)
             self.save_btn.setEnabled(True)
         else:
             self.image_counter_label.setText("No images loaded")
-            self.progress_bar.setVisible(False)
+            # Cancel any pending debounce timer
+            self._slider_debounce_timer.stop()
+            self._pending_image_index = None
+            self.image_slider.setVisible(False)
+            self.image_slider.setMaximum(0)
+            self.image_slider.setValue(0)
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             self.save_btn.setEnabled(False)
+    
+    def _on_slider_value_changed(self, value: int):
+        """Handle slider value change - use debouncing when dragging."""
+        # Only handle if slider change was user-initiated (not programmatic update)
+        if self._updating_slider:
+            return
+        
+        # Update the counter label immediately to show target image
+        total = self.image_slider.maximum() + 1
+        if total > 0:
+            self.image_counter_label.setText(f"Image {value + 1} of {total}")
+        
+        # If user is dragging, use debouncing to wait for them to slow down
+        if self._is_dragging:
+            # Store the pending index
+            self._pending_image_index = value
+            # Restart the debounce timer (300ms delay)
+            self._slider_debounce_timer.stop()
+            self._slider_debounce_timer.start(300)
+        else:
+            # If not dragging (e.g., clicked on a specific position), navigate immediately
+            self.image_index_requested.emit(value)
+    
+    def _on_slider_pressed(self):
+        """Handle slider press - user started dragging."""
+        self._is_dragging = True
+    
+    def _on_slider_released(self):
+        """Handle slider release - navigate to final position immediately."""
+        self._is_dragging = False
+        # Stop the debounce timer
+        self._slider_debounce_timer.stop()
+        # Navigate to the current slider value immediately
+        if self._pending_image_index is not None:
+            self.image_index_requested.emit(self._pending_image_index)
+            self._pending_image_index = None
+        else:
+            # Fallback to current slider value
+            self.image_index_requested.emit(self.image_slider.value())
+    
+    def _on_slider_debounce_timeout(self):
+        """Handle debounce timeout - user has slowed down, navigate to pending index."""
+        if self._pending_image_index is not None:
+            self.image_index_requested.emit(self._pending_image_index)
+            self._pending_image_index = None
     
     def update_class_list(self, class_names: List[str]):
         """Update class selection."""
@@ -740,4 +834,12 @@ Mouse Controls:
         
         # Update progress
         self._update_progress_display()
+    
+    def set_copy_boxes_count(self, count: int):
+        """Set the number of images to copy boxes to."""
+        self.copy_boxes_spinbox.setValue(count)
+    
+    def get_copy_boxes_count(self) -> int:
+        """Get the number of images to copy boxes to."""
+        return self.copy_boxes_spinbox.value()
 

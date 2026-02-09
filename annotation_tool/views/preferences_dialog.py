@@ -25,6 +25,7 @@ class PreferencesDialog(QDialog):
     auto_load_session_changed = pyqtSignal(bool)
     auto_save_interval_changed = pyqtSignal(int)
     max_recent_items_changed = pyqtSignal(int)
+    copy_boxes_count_changed = pyqtSignal(int)
     settings_file_path_changed = pyqtSignal(str)  # Emitted when settings file path is changed
     
     def __init__(self, parent=None):
@@ -39,6 +40,7 @@ class PreferencesDialog(QDialog):
         self._auto_load_session = True
         self._auto_save_interval = 30
         self._max_recent_items = 5
+        self._copy_boxes_count = 1
         self._settings_file_path = ""
         self._setup_ui()
     
@@ -325,6 +327,29 @@ class PreferencesDialog(QDialog):
         recent_group.setLayout(recent_layout)
         layout.addWidget(recent_group)
         
+        # Copy boxes count
+        copy_boxes_group = QGroupBox("Copy Boxes Settings")
+        copy_boxes_layout = QGridLayout()
+        
+        copy_boxes_label = QLabel("Number of images to copy boxes to:")
+        copy_boxes_layout.addWidget(copy_boxes_label, 0, 0)
+        
+        self.copy_boxes_spinbox = QSpinBox()
+        self.copy_boxes_spinbox.setMinimum(1)
+        # Allow large values; the actual copy logic will clamp to the
+        # number of available images, so this just controls intent.
+        self.copy_boxes_spinbox.setMaximum(2147483647)
+        self.copy_boxes_spinbox.setValue(self._copy_boxes_count)
+        copy_boxes_layout.addWidget(self.copy_boxes_spinbox, 0, 1)
+        
+        copy_boxes_info = QLabel("When using Ctrl+C to copy boxes, this many subsequent images will receive the copied annotations.")
+        copy_boxes_info.setWordWrap(True)
+        copy_boxes_info.setStyleSheet("font-size: 10px; color: #666666; margin-top: 5px;")
+        copy_boxes_layout.addWidget(copy_boxes_info, 1, 0, 1, 2)
+        
+        copy_boxes_group.setLayout(copy_boxes_layout)
+        layout.addWidget(copy_boxes_group)
+        
         layout.addStretch()
         return widget
     
@@ -576,6 +601,10 @@ class PreferencesDialog(QDialog):
         if max_recent != self._max_recent_items:
             self.max_recent_items_changed.emit(max_recent)
         
+        copy_boxes_count = self.copy_boxes_spinbox.value()
+        if copy_boxes_count != self._copy_boxes_count:
+            self.copy_boxes_count_changed.emit(copy_boxes_count)
+        
         # Settings file path
         if self._settings_file_path:
             self.settings_file_path_changed.emit(self._settings_file_path)
@@ -629,6 +658,11 @@ class PreferencesDialog(QDialog):
         """Set maximum recent items."""
         self._max_recent_items = max_items
         self.max_recent_spinbox.setValue(max_items)
+    
+    def set_copy_boxes_count(self, count: int):
+        """Set the number of images to copy boxes to."""
+        self._copy_boxes_count = count
+        self.copy_boxes_spinbox.setValue(count)
     
     def set_settings_file_path(self, file_path: str):
         """Set the current settings file path."""

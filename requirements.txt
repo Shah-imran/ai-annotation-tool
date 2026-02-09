@@ -8,3 +8,4 @@ openpyxl>=3.0.0  # For Excel file support
 # Annotation Tool (Scan Lab) dependencies
 PyQt5>=5.15.0
 opencv-python>=4.5.0  # For image processing 
+Pillow>=9.0.0  # For TIFF to JPG conversion

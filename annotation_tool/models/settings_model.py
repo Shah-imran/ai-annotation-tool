@@ -194,6 +194,8 @@ class SettingsModel(QObject):
             "max_recent_items": 5,
             "auto_load_last_session": True,
             "auto_save_interval": 30,  # seconds
+            "copy_boxes_count": 1,  # Number of images to copy boxes to
+            "sidebar_width": 0,  # Sidebar width (0 means use default)
             # Q&A settings
             "qa_enabled": False,
             "qa_questions_file": "",
@@ -294,6 +296,32 @@ class SettingsModel(QObject):
         """Set maximum number of recent items to remember."""
         self._settings["max_recent_items"] = max(1, min(20, max_items))
         self._save_settings()
+    
+    def get_copy_boxes_count(self) -> int:
+        """Get number of images to copy boxes to."""
+        return self._settings.get("copy_boxes_count", 1)
+    
+    def set_copy_boxes_count(self, count: int):
+        """Set number of images to copy boxes to."""
+        # Allow any positive value here; the actual copy operation will
+        # clamp to the number of available images, so there's no need
+        # to enforce an arbitrary upper limit in settings.
+        try:
+            safe_count = int(count)
+        except (TypeError, ValueError):
+            safe_count = 1
+        self._settings["copy_boxes_count"] = max(1, safe_count)
+        self._save_settings()
+    
+    def get_sidebar_width(self) -> int:
+        """Get saved sidebar width."""
+        return self._settings.get("sidebar_width", 0)
+    
+    def set_sidebar_width(self, width: int):
+        """Set sidebar width."""
+        if width > 0:
+            self._settings["sidebar_width"] = width
+            self._save_settings()
     
     # Helper methods
     def _add_to_recent_list(self, key: str, item: str):

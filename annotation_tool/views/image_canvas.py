@@ -44,6 +44,7 @@ class ImageCanvas(QWidget):
         self._annotations = []
         self._class_names = []
         self._selected_annotation_index = -1
+        self._highlighted_indices = set()  # Set of indices to highlight (for selection dialog)
         
         # Drawing settings
         self._pen_width = 2
@@ -153,6 +154,21 @@ class ImageCanvas(QWidget):
         self._selected_annotation_index = index
         self.update()
     
+    def set_highlighted_indices(self, indices: set):
+        """
+        Set highlighted annotation indices (for selection dialog).
+        
+        Args:
+            indices: Set of annotation indices to highlight
+        """
+        self._highlighted_indices = indices.copy() if indices else set()
+        self.update()
+    
+    def clear_highlights(self):
+        """Clear all highlighted annotations."""
+        self._highlighted_indices.clear()
+        self.update()
+    
     def set_pen_width(self, width: int):
         """Set annotation box pen width."""
         self._pen_width = max(1, min(5, width))
@@ -242,9 +258,13 @@ class ImageCanvas(QWidget):
             widget_y2 = int(y2 * self._scale_factor + self._image_offset.y())
             
             # Choose color and pen width
+            # Priority: selected > highlighted (from dialog) > normal
             if i == self._selected_annotation_index:
                 color = self._selected_color
                 pen_width = self._pen_width + 2  # Make selected boxes thicker
+            elif i in self._highlighted_indices:
+                color = self._selected_color  # Red for highlighted boxes
+                pen_width = self._pen_width + 1  # Slightly thicker for highlighted
             else:
                 color = self._annotation_colors[annotation.class_id % len(self._annotation_colors)]
                 pen_width = self._pen_width

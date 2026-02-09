@@ -244,3 +244,5 @@ missing module named charset_normalizer - imported by numpy.f2py.crackfortran (o
 missing module named numpy.random.RandomState - imported by numpy.random (top-level), numpy.random._generator (top-level)
 missing module named yaml - imported by numpy.__config__ (delayed)
 missing module named numpy._distributor_init_local - imported by numpy (optional), numpy._distributor_init (optional)
+missing module named olefile - imported by PIL.FpxImagePlugin (top-level), PIL.MicImagePlugin (top-level)
+missing module named defusedxml - imported by PIL.Image (optional)
