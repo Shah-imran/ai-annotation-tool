@@ -40,22 +40,93 @@ class _TiffToJpgWorker(QObject):
             
             try:
                 with Image.open(src_path) as img:
-                    # Use first frame and convert to RGB for JPEG
+                    # Use first frame for multi-page TIFFs
                     try:
                         img.seek(0)
                     except Exception:
                         # Some images may not be multi-frame; ignore
                         pass
-                    rgb = img.convert("RGB")
+                    
+                    # Get image mode and handle different TIFF formats
+                    mode = img.mode
+                    
+                    # Handle transparency/alpha channel by compositing on white background
+                    if mode in ('RGBA', 'LA', 'P') and 'transparency' in img.info:
+                        # Create white background
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        if mode == 'P':
+                            # Palette mode with transparency
+                            img = img.convert('RGBA')
+                        # Composite image on white background
+                        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                        rgb = background
+                    elif mode == 'RGBA':
+                        # RGBA without transparency info - composite on white
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        background.paste(img, mask=img.split()[-1])
+                        rgb = background
+                    elif mode == 'LA':
+                        # Grayscale with alpha - convert to RGB
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        rgb_img = img.convert('RGB')
+                        background.paste(rgb_img, mask=img.split()[-1])
+                        rgb = background
+                    elif mode == 'CMYK':
+                        # CMYK color mode - convert to RGB
+                        rgb = img.convert('RGB')
+                    elif mode == 'L':
+                        # Grayscale - convert to RGB
+                        rgb = img.convert('RGB')
+                    elif mode == 'P':
+                        # Palette mode - convert to RGB
+                        rgb = img.convert('RGB')
+                    elif mode == 'RGB':
+                        # Already RGB
+                        rgb = img
+                    else:
+                        # Fallback: try to convert to RGB
+                        print(f"Warning: Unknown image mode '{mode}' for {src_path}, attempting RGB conversion")
+                        rgb = img.convert('RGB')
+                    
+                    # Handle 16-bit TIFFs - Pillow's convert might not handle them properly
+                    # Check if image is 16-bit and needs scaling
+                    if mode in ('I', 'I;16', 'I;16B', 'I;16L') or 'I;16' in mode:
+                        # 16-bit integer mode - need to scale to 8-bit
+                        try:
+                            import numpy as np
+                            # Convert to numpy array
+                            arr = np.array(img)
+                            if arr.dtype == np.uint16 or arr.dtype == np.int16:
+                                # Normalize 16-bit to 8-bit range (0-65535 -> 0-255)
+                                arr_normalized = ((arr.astype(np.float32) / 65535.0) * 255.0).astype(np.uint8)
+                                # Convert back to PIL Image
+                                rgb = Image.fromarray(arr_normalized, mode='RGB' if len(arr_normalized.shape) == 3 else 'L')
+                                if rgb.mode == 'L':
+                                    rgb = rgb.convert('RGB')
+                            else:
+                                # Already 8-bit or other format, just convert to RGB
+                                rgb = Image.fromarray(arr).convert('RGB')
+                        except ImportError:
+                            # NumPy not available - use Pillow's point operation
+                            # This is a fallback but may not work perfectly for 16-bit
+                            if rgb.mode in ('I', 'I;16'):
+                                rgb = rgb.convert('RGB')
+                        except Exception as e:
+                            print(f"Warning: Could not handle 16-bit image {src_path}: {e}")
+                            # Fallback to simple conversion
+                            rgb = img.convert('RGB')
                     
                     base_name = os.path.splitext(os.path.basename(src_path))[0]
                     dst_path = os.path.join(self._output_dir, base_name + ".jpg")
                     
-                    rgb.save(dst_path, "JPEG", quality=95)
+                    # Save as JPEG with quality 95
+                    rgb.save(dst_path, "JPEG", quality=95, optimize=True)
                     converted += 1
             except Exception as e:
                 errors += 1
                 print(f"Error converting {src_path} to JPG: {e}")
+                import traceback
+                traceback.print_exc()
             
             self.progress.emit(idx, total)
         

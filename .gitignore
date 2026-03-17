@@ -16,3 +16,4 @@ x64/
 *.tiff
 *.npz
 *.npy
+build/

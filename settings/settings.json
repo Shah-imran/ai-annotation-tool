@@ -1,5 +1,5 @@
 {
-  "last_image_directory": "D:/Research-work/Yolo_mark/x64/Reconstructed_Tiff_Stack_Pcb9/Reconstructed_Tiff_Stack_Pcb9",
+  "last_image_directory": "D:/Research-work/Annotation-tool/Dataset",
   "last_image_list_file": "",
   "last_classes_file": "D:/Research-work/Yolo_mark/Classes/xray.names",
   "last_base_directory": "",
@@ -10,6 +10,7 @@
     "height": 1009
   },
   "recent_image_directories": [
+    "D:/Research-work/Annotation-tool/Dataset",
     "D:/Research-work/Yolo_mark/x64/Reconstructed_Tiff_Stack_Pcb9/Reconstructed_Tiff_Stack_Pcb9"
   ],
   "recent_classes_files": [
