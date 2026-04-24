@@ -17,3 +17,5 @@ x64/
 *.npz
 *.npy
 build/
+
+.settings/settings.json

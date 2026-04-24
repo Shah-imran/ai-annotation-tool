@@ -7,7 +7,18 @@ import cv2
 from typing import Optional, Tuple
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QScrollArea
 from PyQt5.QtCore import Qt, pyqtSignal, QRect, QPoint
-from PyQt5.QtGui import QPainter, QPen, QPixmap, QFont, QColor, QBrush, QMouseEvent, QPaintEvent, QImage
+from PyQt5.QtGui import (
+    QPainter,
+    QPen,
+    QPixmap,
+    QFont,
+    QColor,
+    QBrush,
+    QCursor,
+    QMouseEvent,
+    QPaintEvent,
+    QImage,
+)
 
 
 class ImageCanvas(QWidget):
@@ -37,7 +48,9 @@ class ImageCanvas(QWidget):
         # Current state
         self._pixmap: Optional[QPixmap] = None
         self._scaled_pixmap: Optional[QPixmap] = None
-        self._scale_factor: float = 1.0
+        self._scale_factor: float = 1.0  # Kept for compatibility; use _scale_x/_scale_y for mapping
+        self._scale_x: float = 1.0
+        self._scale_y: float = 1.0
         self._image_offset: QPoint = QPoint(0, 0)
         
         # Annotation data
@@ -111,25 +124,30 @@ class ImageCanvas(QWidget):
             return
         
         widget_size = self.size()
-        image_size = self._pixmap.size()
+        iw, ih = self._pixmap.width(), self._pixmap.height()
+        if iw <= 0 or ih <= 0:
+            return
         
-        # Calculate scale factor to fit image in widget
-        scale_x = widget_size.width() / image_size.width()
-        scale_y = widget_size.height() / image_size.height()
-        self._scale_factor = min(scale_x, scale_y, 1.0)  # Don't scale up
+        scale = min(widget_size.width() / iw, widget_size.height() / ih, 1.0)
+        tw = max(1, int(round(iw * scale)))
+        th = max(1, int(round(ih * scale)))
         
-        # Calculate scaled size and offset for centering
-        scaled_width = int(image_size.width() * self._scale_factor)
-        scaled_height = int(image_size.height() * self._scale_factor)
-        
-        self._image_offset.setX((widget_size.width() - scaled_width) // 2)
-        self._image_offset.setY((widget_size.height() - scaled_height) // 2)
-        
-        # Create scaled pixmap
         self._scaled_pixmap = self._pixmap.scaled(
-            scaled_width, scaled_height,
+            tw, th,
             Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
+        
+        dw = self._scaled_pixmap.width()
+        dh = self._scaled_pixmap.height()
+        # Center the *actual* pixmap. Requested (tw,th) can differ from (dw,dh) when
+        # integer rounding breaks aspect vs Qt's KeepAspectRatio fit — that mismatch
+        # used to skew widget↔image mapping and the loupe vs on-screen pixels.
+        self._image_offset.setX((widget_size.width() - dw) // 2)
+        self._image_offset.setY((widget_size.height() - dh) // 2)
+        
+        self._scale_x = dw / float(iw)
+        self._scale_y = dh / float(ih)
+        self._scale_factor = (self._scale_x + self._scale_y) / 2.0
     
     def set_annotations(self, annotations, class_names):
         """
@@ -206,6 +224,11 @@ class ImageCanvas(QWidget):
             'method': self._magnification_method
         }
     
+    def enterEvent(self, event):
+        """Keep magnification anchor aligned with the cursor when the pointer enters the canvas."""
+        self._last_mouse_pos = self.mapFromGlobal(QCursor.pos())
+        super().enterEvent(event)
+
     def resizeEvent(self, event):
         """Handle widget resize."""
         super().resizeEvent(event)
@@ -251,11 +274,11 @@ class ImageCanvas(QWidget):
                 self._pixmap.width(), self._pixmap.height()
             )
             
-            # Convert to widget coordinates
-            widget_x1 = int(x1 * self._scale_factor + self._image_offset.x())
-            widget_y1 = int(y1 * self._scale_factor + self._image_offset.y())
-            widget_x2 = int(x2 * self._scale_factor + self._image_offset.x())
-            widget_y2 = int(y2 * self._scale_factor + self._image_offset.y())
+            # Convert to widget coordinates (must match _scaled_pixmap size, not a single blended scale)
+            widget_x1 = int(x1 * self._scale_x + self._image_offset.x())
+            widget_y1 = int(y1 * self._scale_y + self._image_offset.y())
+            widget_x2 = int(x2 * self._scale_x + self._image_offset.x())
+            widget_y2 = int(y2 * self._scale_y + self._image_offset.y())
             
             # Choose color and pen width
             # Priority: selected > highlighted (from dialog) > normal
@@ -305,67 +328,83 @@ class ImageCanvas(QWidget):
         
         painter.drawRect(x1, y1, x2 - x1, y2 - y1)
     
+    def _widget_to_image_float(self, widget_point: QPoint) -> Tuple[float, float]:
+        """Map widget position to full-image coordinates using the displayed pixmap geometry."""
+        if not self._pixmap or not self._scaled_pixmap:
+            return (0.0, 0.0)
+        iw, ih = self._pixmap.width(), self._pixmap.height()
+        dw, dh = self._scaled_pixmap.width(), self._scaled_pixmap.height()
+        if dw <= 0 or dh <= 0:
+            return (0.0, 0.0)
+        ox, oy = self._image_offset.x(), self._image_offset.y()
+        fx = (widget_point.x() - ox) * iw / float(dw)
+        fy = (widget_point.y() - oy) * ih / float(dh)
+        return (fx, fy)
+
     def _draw_magnification(self, painter: QPainter):
         """Draw magnification window."""
-        if not self._pixmap:
+        if not self._pixmap or not self._scaled_pixmap:
             return
         
-        # Get mouse position in widget coordinates
         mx = self._last_mouse_pos.x()
         my = self._last_mouse_pos.y()
+        image_x, image_y = self._widget_to_image_float(QPoint(mx, my))
         
-        # Convert to image coordinates
-        image_x = (mx - self._image_offset.x()) / self._scale_factor
-        image_y = (my - self._image_offset.y()) / self._scale_factor
+        # Square region in source pixels; half_size must be >= 1 so resize is stable
+        half_size = max(1, int(self._magnification_size / (2 * self._magnification_scale)))
+        side = 2 * half_size
         
-        # Clamp to image bounds
-        image_x = max(0, min(self._pixmap.width() - 1, image_x))
-        image_y = max(0, min(self._pixmap.height() - 1, image_y))
-        
-        # Calculate region to magnify
-        half_size = int(self._magnification_size / (2 * self._magnification_scale))
-        mag_x1 = max(0, int(image_x - half_size))
-        mag_y1 = max(0, int(image_y - half_size))
-        mag_x2 = min(self._pixmap.width(), int(image_x + half_size))
-        mag_y2 = min(self._pixmap.height(), int(image_y + half_size))
-        
-        if mag_x2 <= mag_x1 or mag_y2 <= mag_y1:
-            return
-        
-        # Convert QPixmap to numpy array for processing
         qimage = self._pixmap.toImage()
-        width = qimage.width()
-        height = qimage.height()
+        pixmap_w = self._pixmap.width()
+        pixmap_h = self._pixmap.height()
         
-        # Convert QImage to format compatible with OpenCV
         qimage = qimage.convertToFormat(qimage.Format_RGB888)
-        
-        # Extract the region
+        source_w = qimage.width()
+        source_h = qimage.height()
+        source_stride = qimage.bytesPerLine()
         ptr = qimage.bits()
-        ptr.setsize(height * width * 3)
-        arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
+        ptr.setsize(source_h * source_stride)
+        # Respect QImage row stride. Assuming tight width*3 can shear/deform the sample.
+        arr = np.frombuffer(ptr, np.uint8).reshape((source_h, source_stride))[:, :source_w * 3]
+        arr = np.ascontiguousarray(arr.reshape((source_h, source_w, 3)))
         
-        # Extract magnification region
-        mag_region = arr[mag_y1:mag_y2, mag_x1:mag_x2]
+        # Keep coordinate space consistent with the array we are sampling from.
+        # On some HiDPI setups, qimage dimensions can differ from logical pixmap size.
+        if pixmap_w > 0 and pixmap_h > 0 and (source_w != pixmap_w or source_h != pixmap_h):
+            image_x = image_x * source_w / float(pixmap_w)
+            image_y = image_y * source_h / float(pixmap_h)
+        
+        # Subpixel sampling centered exactly at the mapped pointer position.
+        # Using an explicit center prevents half-pixel bias that can make the
+        # sampled feature appear slightly shifted from the cursor target.
+        iy, ix = np.mgrid[0:side, 0:side].astype(np.float32)
+        center = (side - 1) / 2.0
+        map_x = (image_x + (ix - center)).astype(np.float32)
+        map_y = (image_y + (iy - center)).astype(np.float32)
+        mag_region = cv2.remap(
+            arr,
+            map_x,
+            map_y,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
         
         if mag_region.size == 0:
             return
         
-        # Resize using OpenCV
         interpolation = self._magnification_methods[self._magnification_method]
-        magnified = cv2.resize(mag_region, 
-                             (self._magnification_size, self._magnification_size),
-                             interpolation=interpolation)
+        magnified = cv2.resize(
+            mag_region,
+            (self._magnification_size, self._magnification_size),
+            interpolation=interpolation,
+        )
         
-        # Convert back to QImage
         h, w, ch = magnified.shape
         bytes_per_line = ch * w
-        qt_image = QImage(magnified.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        
-        # Convert to QPixmap
+        qt_image = QImage(magnified.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         mag_pixmap = QPixmap.fromImage(qt_image)
         
-        # Calculate position for magnification window
+        # Loupe position (follows pointer)
         mag_x = min(mx + 20, self.width() - self._magnification_size)
         mag_y = min(my + 20, self.height() - self._magnification_size)
         
@@ -443,15 +482,9 @@ class ImageCanvas(QWidget):
         """Convert widget coordinates to image coordinates."""
         if not self._pixmap:
             return (0, 0)
-        
-        # Convert to image coordinates
-        image_x = (widget_point.x() - self._image_offset.x()) / self._scale_factor
-        image_y = (widget_point.y() - self._image_offset.y()) / self._scale_factor
-        
-        # Clamp to image bounds
-        image_x = max(0, min(self._pixmap.width() - 1, image_x))
-        image_y = max(0, min(self._pixmap.height() - 1, image_y))
-        
+        fx, fy = self._widget_to_image_float(widget_point)
+        image_x = max(0, min(self._pixmap.width() - 1, fx))
+        image_y = max(0, min(self._pixmap.height() - 1, fy))
         return (int(image_x), int(image_y))
     
     def _is_point_in_image(self, point: QPoint) -> bool:
@@ -518,8 +551,8 @@ class ImageCanvas(QWidget):
                 annotation = self._annotations[self._moving_annotation_index]
                 
                 # Convert delta to image coordinates
-                delta_x = delta.x() / self._scale_factor
-                delta_y = delta.y() / self._scale_factor
+                delta_x = delta.x() / self._scale_x
+                delta_y = delta.y() / self._scale_y
                 
                 # Update annotation center
                 new_center_x = annotation.x * self._pixmap.width() + delta_x
@@ -574,6 +607,9 @@ class ImageCanvas(QWidget):
     def wheelEvent(self, event):
         """Handle mouse wheel events for magnification scale."""
         if self._magnification_enabled:
+            # Anchor zoom to the pointer: _draw_magnification uses _last_mouse_pos, which
+            # otherwise only updates on move/press and can stay at (0,0) or a stale point.
+            self._last_mouse_pos = event.pos()
             # Get wheel delta
             delta = event.angleDelta().y() / 120  # Normalize wheel delta
             

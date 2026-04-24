@@ -1,0 +1,24 @@
+{
+  "last_image_directory": "C:/path/to/your/images",
+  "last_image_list_file": "",
+  "last_classes_file": "C:/path/to/classes.txt",
+  "last_base_directory": "",
+  "window_geometry": {
+    "x": 100,
+    "y": 100,
+    "width": 1400,
+    "height": 800
+  },
+  "recent_image_directories": [],
+  "recent_classes_files": [],
+  "max_recent_items": 5,
+  "auto_load_last_session": true,
+  "auto_save_interval": 30,
+  "copy_boxes_count": 1,
+  "sidebar_width": 0,
+  "qa_enabled": false,
+  "qa_questions_file": "",
+  "qa_answers_folder": "",
+  "recent_qa_questions_files": [],
+  "recent_qa_answers_folders": []
+}
