@@ -6,6 +6,12 @@ from .settings_model import SettingsModel
 from .questions_model import QuestionsModel
 from .qa_answers_model import QAAnswersModel
 from .undo_manager import UndoManager, ActionType
+from .volume_model import VolumeModel
+from .label_volume_model import LabelVolumeModel
 
-__all__ = ['BoundingBox', 'AnnotationModel', 'ImageModel', 'SettingsModel', 'QuestionsModel', 'QAAnswersModel', 'UndoManager', 'ActionType']
+__all__ = [
+    'BoundingBox', 'AnnotationModel', 'ImageModel', 'SettingsModel',
+    'QuestionsModel', 'QAAnswersModel', 'UndoManager', 'ActionType',
+    'VolumeModel', 'LabelVolumeModel',
+]
 

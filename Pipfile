@@ -15,6 +15,9 @@ numpy = "*"
 scipy = "*"
 h5py = "*"
 pyinstaller = "*"
+nibabel = "*"
+pyvista = "*"
+pyvistaqt = "*"
 
 [dev-packages]
 

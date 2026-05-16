@@ -6,10 +6,14 @@ from typing import Optional
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, Qt
 from PyQt5.QtWidgets import QProgressDialog
 from PIL import Image
-from ..models import ImageModel, AnnotationModel, SettingsModel, QuestionsModel, QAAnswersModel
+from ..models import (
+    ImageModel, AnnotationModel, SettingsModel, QuestionsModel, QAAnswersModel,
+    VolumeModel, LabelVolumeModel,
+)
 from ..views import MainWindow
 from ..views.preferences_dialog import PreferencesDialog
 from .annotation_controller import AnnotationController
+from .volume_controller import VolumeController
 
 
 class _TiffToJpgWorker(QObject):
@@ -250,6 +254,8 @@ class MainController(QObject):
         self._annotation_model = AnnotationModel()
         self._questions_model = QuestionsModel()
         self._qa_answers_model = QAAnswersModel()
+        self._volume_model = VolumeModel()
+        self._label_volume_model = LabelVolumeModel()
         
         # Initialize main window
         self._main_window = MainWindow()
@@ -260,7 +266,20 @@ class MainController(QObject):
             self._main_window.image_canvas,
             self._main_window.control_panel
         )
+
+        self._volume_controller = VolumeController(
+            self._volume_model,
+            self._label_volume_model,
+            self._main_window.volume_workspace,
+            self._main_window,
+            self._get_annotations_output_dir,
+            self._get_voxel_spacing_tuple,
+            self._get_mask_class_names,
+            get_last_scan_dir=self._settings_model.get_last_volume_scan_dir,
+        )
         
+        self._initializing = True
+
         # Connect signals
         self._connect_signals()
         
@@ -275,7 +294,11 @@ class MainController(QObject):
         
         # Initialize control panel with settings
         self._main_window.control_panel.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
-        
+
+        # Restore annotation mode and 3D volume session
+        self._restore_volume_session_on_startup()
+        self._initializing = False
+
         # Show settings path (for debugging)
         print(f"Settings saved to: {self._settings_model.get_settings_file_path()}")
     
@@ -291,6 +314,29 @@ class MainController(QObject):
         self._main_window.load_class_names.connect(self._on_load_class_names)
         self._main_window.load_settings_file.connect(self._on_load_settings_file)
         self._main_window.convert_tiff_to_jpg_requested.connect(self._on_convert_tiff_to_jpg)
+        self._main_window.mode_changed.connect(self._on_annotation_mode_changed)
+        self._main_window.load_volume_scan_requested.connect(self._on_load_volume_scan)
+        self._main_window.volume_save_requested.connect(self._on_volume_save)
+        self._volume_controller.status_message.connect(self._main_window.show_message)
+        self._volume_model.slice_changed.connect(self._on_volume_slice_changed)
+        self._main_window.volume_workspace.control_panel.brush_radius_changed.connect(
+            self._on_volume_brush_radius_changed
+        )
+        self._main_window.volume_workspace.control_panel.class_changed.connect(
+            self._on_volume_class_changed
+        )
+        self._main_window.volume_workspace.splitter_layout_changed.connect(
+            self._on_volume_splitter_layout_changed
+        )
+        self._main_window.volume_workspace.preview_pane_collapsed_changed.connect(
+            self._on_volume_preview_pane_collapsed
+        )
+        self._main_window.volume_workspace.slice_pane_collapsed_changed.connect(
+            self._on_volume_slice_pane_collapsed
+        )
+        self._main_window.volume_workspace.control_panel.preview_settings_changed.connect(
+            self._on_volume_preview_settings_changed
+        )
         self._main_window.qa_mode_toggled.connect(self._on_qa_mode_toggled)
         self._main_window.preferences_requested.connect(self._on_preferences_requested)
         self._main_window.window_closing.connect(self.save_window_state)
@@ -935,11 +981,12 @@ class MainController(QObject):
             self._main_window.show_message("Welcome! Load images and classes to start annotating")
     
     def save_window_state(self):
-        """Save current window state to settings."""
+        """Save current window state and session paths to settings."""
         geometry = self._main_window.geometry()
         self._settings_model.set_window_geometry(
             geometry.x(), geometry.y(), geometry.width(), geometry.height()
         )
+        self._persist_volume_session()
     
     # Q&A Methods
     def _initialize_qa_system(self):
@@ -992,6 +1039,17 @@ class MainController(QObject):
             self._preferences_dialog.max_recent_items_changed.connect(self._on_max_recent_items_changed)
             self._preferences_dialog.copy_boxes_count_changed.connect(self._on_copy_boxes_count_changed)
             self._preferences_dialog.settings_file_path_changed.connect(self._on_settings_file_path_changed)
+            self._preferences_dialog.volume_scan_dir_changed.connect(self._on_volume_scan_dir_changed)
+            self._preferences_dialog.annotations_output_dir_changed.connect(
+                self._on_annotations_output_dir_changed
+            )
+            self._preferences_dialog.voxel_spacing_changed.connect(self._on_voxel_spacing_changed)
+            self._preferences_dialog.default_annotation_mode_changed.connect(
+                self._on_default_annotation_mode_changed
+            )
+            self._preferences_dialog.volume_brush_radius_changed.connect(
+                self._on_volume_brush_radius_preference_changed
+            )
         
         # Set current values
         self._preferences_dialog.set_image_directory(self._settings_model.get_last_image_directory())
@@ -1008,6 +1066,21 @@ class MainController(QObject):
         self._preferences_dialog.set_max_recent_items(self._settings_model.get_max_recent_items())
         self._preferences_dialog.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
         self._preferences_dialog.set_settings_file_path(self._settings_model.get_settings_file_path())
+        spacing = self._settings_model.get_voxel_spacing()
+        self._preferences_dialog.set_volume_scan_dir(self._settings_model.get_last_volume_scan_dir())
+        self._preferences_dialog.set_annotations_output_dir(
+            self._settings_model.get_annotations_output_directory()
+            or self._get_annotations_output_dir()
+        )
+        self._preferences_dialog.set_voxel_spacing(
+            float(spacing[0]), float(spacing[1]), float(spacing[2])
+        )
+        self._preferences_dialog.set_default_annotation_mode(
+            self._settings_model.get_last_annotation_mode()
+        )
+        self._preferences_dialog.set_volume_brush_radius(
+            self._settings_model.get_volume_brush_radius()
+        )
         
         # Set control panel value
         self._main_window.control_panel.set_copy_boxes_count(self._settings_model.get_copy_boxes_count())
@@ -1077,6 +1150,38 @@ class MainController(QObject):
         # Sync control panel value
         self._main_window.control_panel.set_copy_boxes_count(count)
         self._main_window.show_message(f"Copy boxes count set to: {count}")
+
+    def _on_volume_scan_dir_changed(self, directory: str):
+        self._settings_model.set_last_volume_scan_dir(directory)
+        if directory and os.path.isdir(directory):
+            if self._volume_controller.load_scan(directory):
+                self._apply_volume_ui_preferences()
+                self._main_window.show_message(
+                    f"Loaded volume scan: {os.path.basename(directory)}"
+                )
+
+    def _on_annotations_output_dir_changed(self, directory: str):
+        self._settings_model.set_annotations_output_directory(directory)
+        self._main_window.show_message(
+            f"Annotations will be saved to: {os.path.basename(directory)}"
+        )
+
+    def _on_voxel_spacing_changed(self, sx: float, sy: float, sz: float):
+        self._settings_model.set_voxel_spacing([sx, sy, sz])
+        self._main_window.show_message(
+            f"Voxel spacing set to ({sx}, {sy}, {sz})"
+        )
+
+    def _on_default_annotation_mode_changed(self, mode: str):
+        self._settings_model.set_last_annotation_mode(mode)
+        self._main_window.set_annotation_mode(mode)
+
+    def _on_volume_brush_radius_preference_changed(self, radius: int):
+        self._settings_model.set_volume_brush_radius(radius)
+        panel = self._main_window.volume_workspace.control_panel
+        canvas = self._main_window.volume_workspace.slice_canvas
+        panel.set_brush_radius(radius)
+        canvas.set_brush_radius(radius)
     
     def _on_toggle_panel_requested(self):
         """Handle toggle panel request from control panel button."""
@@ -1090,6 +1195,16 @@ class MainController(QObject):
     
     def _on_undo_requested(self):
         """Handle undo request."""
+        if self._main_window.is_volume_mode():
+            if not self._volume_controller.can_undo():
+                self._main_window.show_message("Nothing to undo")
+                return False
+            if self._volume_controller.undo():
+                self._main_window.show_message("Undo successful")
+                return True
+            self._main_window.show_message("Nothing to undo")
+            return False
+
         # Check if we can undo
         if not self._annotation_model.can_undo():
             self._main_window.show_message("Nothing to undo")
@@ -1168,6 +1283,16 @@ class MainController(QObject):
     
     def _on_redo_requested(self):
         """Handle redo request."""
+        if self._main_window.is_volume_mode():
+            if not self._volume_controller.can_redo():
+                self._main_window.show_message("Nothing to redo")
+                return False
+            if self._volume_controller.redo():
+                self._main_window.show_message("Redo successful")
+                return True
+            self._main_window.show_message("Nothing to redo")
+            return False
+
         # Check if we can redo
         if not self._annotation_model.can_redo():
             self._main_window.show_message("Nothing to redo")
@@ -1314,10 +1439,13 @@ class MainController(QObject):
         """Handle settings file load request."""
         if self._settings_model.load_settings_from_file(file_path):
             self._main_window.show_message(f"Settings loaded from: {os.path.basename(file_path)}")
-            # Reload session data based on new settings
             self._load_last_session()
-            # Reinitialize Q&A system with new settings
             self._initialize_qa_system()
+            last_mode = self._settings_model.get_last_annotation_mode()
+            self._main_window.set_annotation_mode(last_mode)
+            if self._settings_model.get_auto_load_last_session():
+                self._restore_volume_scan_if_saved()
+            self._apply_volume_ui_preferences()
         else:
             self._main_window.show_error("Error", "Failed to load settings file. Please check the file format.")
     
@@ -1326,5 +1454,230 @@ class MainController(QObject):
         # Update window geometry if changed
         geometry = self._settings_model.get_window_geometry()
         self._main_window.setGeometry(geometry["x"], geometry["y"], geometry["width"], geometry["height"])
-    
+
+    def _get_annotations_output_dir(self) -> str:
+        """Directory for label memmaps and NIfTI exports."""
+        configured = self._settings_model.get_annotations_output_directory()
+        if configured and os.path.isdir(configured):
+            return configured
+        if configured:
+            os.makedirs(configured, exist_ok=True)
+            return configured
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(current_dir))
+        default_dir = os.path.join(project_root, "sample scan", "annotations")
+        os.makedirs(default_dir, exist_ok=True)
+        self._settings_model.set_annotations_output_directory(default_dir)
+        return default_dir
+
+    def _get_voxel_spacing_tuple(self):
+        s = self._settings_model.get_voxel_spacing()
+        return (float(s[0]), float(s[1]), float(s[2]))
+
+    def _get_mask_class_names(self) -> list:
+        names = self._annotation_model.class_names
+        if names:
+            return names
+        return ["roi"]
+
+    def _on_annotation_mode_changed(self, mode: str):
+        self._settings_model.set_last_annotation_mode(mode)
+        if self._initializing:
+            return
+        label = "2D bounding box" if mode == "2d" else "3D volume"
+        self._main_window.show_message(f"Switched to {label} mode")
+        if mode == "3d" and not self._volume_model.scan_dir:
+            if self._settings_model.get_auto_load_last_session():
+                self._restore_volume_scan_if_saved()
+                self._apply_volume_ui_preferences()
+
+    def _on_load_volume_scan(self, directory: str):
+        if self._volume_controller.load_scan(directory):
+            self._settings_model.set_last_volume_scan_dir(directory)
+            self._persist_volume_session()
+
+    def _on_volume_save(self):
+        self._volume_controller.save_labels()
+        self._persist_volume_session()
+
+    def _on_volume_slice_changed(self, index: int, total: int):
+        if total > 0:
+            self._settings_model.set_last_volume_slice_index(index)
+
+    def _on_volume_brush_radius_changed(self, radius: int):
+        self._settings_model.set_volume_brush_radius(radius)
+
+    def _on_volume_class_changed(self, combo_index: int):
+        combo = self._main_window.volume_workspace.control_panel.class_combo
+        class_id = combo.itemData(combo_index)
+        if class_id is not None:
+            self._settings_model.set_volume_class_id(int(class_id))
+
+    def _restore_volume_session_on_startup(self):
+        """Restore 2D/3D tab and last volume scan paths."""
+        last_mode = self._settings_model.get_last_annotation_mode()
+        self._main_window.set_annotation_mode(last_mode)
+        self._apply_volume_ui_preferences()
+        if self._settings_model.get_auto_load_last_session():
+            self._restore_volume_scan_if_saved()
+
+    def _restore_volume_scan_if_saved(self):
+        last_vol = self._settings_model.get_last_volume_scan_dir()
+        if not last_vol or not os.path.isdir(last_vol):
+            return
+        if self._volume_model.scan_dir == last_vol:
+            self._apply_volume_ui_preferences()
+            return
+        self._main_window._volume_dialog_start_dir = last_vol
+        if self._volume_controller.load_scan(last_vol):
+            self._apply_volume_ui_preferences()
+
+    def _on_volume_splitter_layout_changed(
+        self, vertical_sizes: list, horizontal_sizes: list
+    ) -> None:
+        if len(vertical_sizes) == 2 and sum(vertical_sizes) > 0:
+            self._settings_model.set_volume_splitter_vertical(vertical_sizes)
+        if len(horizontal_sizes) == 2 and horizontal_sizes[1] > 0:
+            self._settings_model.set_volume_splitter_horizontal(horizontal_sizes)
+
+    def _apply_volume_splitter_sizes(self) -> None:
+        ws = self._main_window.volume_workspace
+        ws.apply_pane_collapsed_state(
+            self._settings_model.get_volume_preview_collapsed(),
+            self._settings_model.get_volume_slice_collapsed(),
+        )
+        ws.apply_splitter_sizes(
+            self._settings_model.get_volume_splitter_vertical(),
+            self._settings_model.get_volume_splitter_horizontal(),
+        )
+        self._sync_volume_pane_menu_checks()
+
+    def _sync_volume_pane_menu_checks(self) -> None:
+        ws = self._main_window.volume_workspace
+        mw = self._main_window
+        if hasattr(mw, "toggle_volume_preview_action"):
+            mw.toggle_volume_preview_action.blockSignals(True)
+            mw.toggle_volume_preview_action.setChecked(not ws.is_preview_collapsed())
+            mw.toggle_volume_preview_action.blockSignals(False)
+        if hasattr(mw, "toggle_volume_slice_action"):
+            mw.toggle_volume_slice_action.blockSignals(True)
+            mw.toggle_volume_slice_action.setChecked(not ws.is_slice_collapsed())
+            mw.toggle_volume_slice_action.blockSignals(False)
+
+    def _on_volume_preview_pane_collapsed(self, collapsed: bool) -> None:
+        self._settings_model.set_volume_preview_collapsed(collapsed)
+
+    def _on_volume_preview_settings_changed(self) -> None:
+        panel = self._main_window.volume_workspace.control_panel
+        self._settings_model.set_volume_preview_level(panel.get_preview_level())
+        self._settings_model.set_volume_preview_stride_z(panel.get_preview_stride_z())
+        self._settings_model.set_volume_preview_stride_xy(panel.get_preview_stride_xy())
+        self._settings_model.set_volume_preview_limit_z_range(
+            panel.is_preview_range_limited()
+        )
+        z0, z1 = panel.get_preview_z_range_0based()
+        self._settings_model.set_volume_preview_z_start(z0)
+        self._settings_model.set_volume_preview_z_end(z1)
+        self._settings_model.set_volume_preview_native_resolution(
+            panel.is_preview_native_resolution()
+        )
+
+    def _on_volume_slice_pane_collapsed(self, collapsed: bool) -> None:
+        self._settings_model.set_volume_slice_collapsed(collapsed)
+
+    def _apply_volume_ui_preferences(self):
+        """Apply saved brush/class/slice preferences to the volume UI."""
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(50, self._apply_volume_splitter_sizes)
+
+        panel = self._main_window.volume_workspace.control_panel
+        canvas = self._main_window.volume_workspace.slice_canvas
+
+        radius = self._settings_model.get_volume_brush_radius()
+        panel.set_brush_radius(radius)
+        canvas.set_brush_radius(radius)
+
+        class_id = self._settings_model.get_volume_class_id()
+        self._label_volume_model.set_current_class_id(class_id)
+        canvas.set_current_class_id(class_id)
+        for i in range(panel.class_combo.count()):
+            if panel.class_combo.itemData(i) == class_id:
+                panel.class_combo.blockSignals(True)
+                panel.class_combo.setCurrentIndex(i)
+                panel.class_combo.blockSignals(False)
+                break
+
+        panel.set_preview_level(self._settings_model.get_volume_preview_level())
+        panel.set_preview_stride_z(self._settings_model.get_volume_preview_stride_z())
+        panel.set_preview_stride_xy(self._settings_model.get_volume_preview_stride_xy())
+        panel.set_preview_native_resolution(
+            self._settings_model.get_volume_preview_native_resolution()
+        )
+        n = self._volume_model.num_slices
+        if n > 0:
+            panel.set_scan_slice_count(n)
+            z0 = self._settings_model.get_volume_preview_z_start()
+            z1 = self._settings_model.get_volume_preview_z_end()
+            if z1 < 0 or z1 >= n:
+                z1 = n - 1
+            z0 = min(max(0, z0), n - 1)
+            panel.set_preview_z_range_1based(
+                z0,
+                z1,
+                self._settings_model.get_volume_preview_limit_z_range(),
+            )
+
+        if self._volume_model.num_slices > 0:
+            idx = self._settings_model.get_last_volume_slice_index()
+            idx = min(idx, self._volume_model.num_slices - 1)
+            self._volume_model.set_current_index(idx)
+
+    def _persist_volume_session(self):
+        """Write 3D volume paths and UI state to settings."""
+        mode = "3d" if self._main_window.is_volume_mode() else "2d"
+        self._settings_model.set_last_annotation_mode(mode)
+
+        if self._volume_model.scan_dir and os.path.isdir(self._volume_model.scan_dir):
+            self._settings_model.set_last_volume_scan_dir(self._volume_model.scan_dir)
+            self._main_window._volume_dialog_start_dir = self._volume_model.scan_dir
+
+        if self._volume_model.num_slices > 0:
+            self._settings_model.set_last_volume_slice_index(
+                self._volume_model.current_index
+            )
+
+        panel = self._main_window.volume_workspace.control_panel
+        self._settings_model.set_volume_brush_radius(panel.radius_spin.value())
+
+        class_id = self._label_volume_model.current_class_id
+        self._settings_model.set_volume_class_id(class_id)
+
+        self._settings_model.set_annotations_output_directory(
+            self._get_annotations_output_dir()
+        )
+
+        ws = self._main_window.volume_workspace
+        v_sizes = ws.view_splitter.sizes()
+        h_sizes = ws.splitter.sizes()
+        if len(v_sizes) == 2 and sum(v_sizes) > 0:
+            self._settings_model.set_volume_splitter_vertical(v_sizes)
+        if len(h_sizes) == 2 and sum(h_sizes) > 0:
+            self._settings_model.set_volume_splitter_horizontal(h_sizes)
+
+        self._settings_model.set_volume_preview_collapsed(ws.is_preview_collapsed())
+        self._settings_model.set_volume_slice_collapsed(ws.is_slice_collapsed())
+        self._settings_model.set_volume_preview_level(panel.get_preview_level())
+        self._settings_model.set_volume_preview_stride_z(panel.get_preview_stride_z())
+        self._settings_model.set_volume_preview_stride_xy(panel.get_preview_stride_xy())
+        self._settings_model.set_volume_preview_limit_z_range(
+            panel.is_preview_range_limited()
+        )
+        z0, z1 = panel.get_preview_z_range_0based()
+        self._settings_model.set_volume_preview_z_start(z0)
+        self._settings_model.set_volume_preview_z_end(z1)
+        self._settings_model.set_volume_preview_native_resolution(
+            panel.is_preview_native_resolution()
+        )
+
 

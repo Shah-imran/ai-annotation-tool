@@ -9,3 +9,6 @@ openpyxl>=3.0.0  # For Excel file support
 PyQt5>=5.15.0
 opencv-python>=4.5.0  # For image processing 
 Pillow>=9.0.0  # For TIFF to JPG conversion
+nibabel>=4.0.0  # NIfTI volume/segmentation I/O
+pyvista>=0.43.0  # 3D volume preview (Phase 2)
+pyvistaqt>=0.11.0  # PyVista embedded in PyQt5

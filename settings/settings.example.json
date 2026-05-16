@@ -20,5 +20,12 @@
   "qa_questions_file": "",
   "qa_answers_folder": "",
   "recent_qa_questions_files": [],
-  "recent_qa_answers_folders": []
+  "recent_qa_answers_folders": [],
+  "last_annotation_mode": "2d",
+  "last_volume_scan_dir": "",
+  "last_volume_slice_index": 0,
+  "annotations_output_directory": "",
+  "voxel_spacing": [1.0, 1.0, 1.0],
+  "volume_brush_radius": 8,
+  "volume_class_id": 1
 }

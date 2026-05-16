@@ -7,7 +7,7 @@ import json
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                             QPushButton, QLineEdit, QFileDialog, QGroupBox, 
                             QGridLayout, QMessageBox, QDialogButtonBox, QCheckBox,
-                            QSpinBox, QTabWidget, QWidget)
+                            QSpinBox, QDoubleSpinBox, QTabWidget, QWidget, QComboBox)
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
@@ -27,6 +27,11 @@ class PreferencesDialog(QDialog):
     max_recent_items_changed = pyqtSignal(int)
     copy_boxes_count_changed = pyqtSignal(int)
     settings_file_path_changed = pyqtSignal(str)  # Emitted when settings file path is changed
+    volume_scan_dir_changed = pyqtSignal(str)
+    annotations_output_dir_changed = pyqtSignal(str)
+    voxel_spacing_changed = pyqtSignal(float, float, float)
+    default_annotation_mode_changed = pyqtSignal(str)  # "2d" or "3d"
+    volume_brush_radius_changed = pyqtSignal(int)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -42,6 +47,11 @@ class PreferencesDialog(QDialog):
         self._max_recent_items = 5
         self._copy_boxes_count = 1
         self._settings_file_path = ""
+        self._volume_scan_dir = ""
+        self._annotations_output_dir = ""
+        self._voxel_spacing = (1.0, 1.0, 1.0)
+        self._default_annotation_mode = "2d"
+        self._volume_brush_radius = 8
         self._setup_ui()
     
     def _setup_ui(self):
@@ -88,6 +98,10 @@ class PreferencesDialog(QDialog):
         # Q&A Settings tab
         qa_tab = self._create_qa_tab()
         tabs.addTab(qa_tab, "Q&A Settings")
+
+        # 3D Volume tab
+        volume_tab = self._create_volume_tab()
+        tabs.addTab(volume_tab, "3D Volume")
         
         # General Settings tab
         general_tab = self._create_general_tab()
@@ -280,6 +294,88 @@ class PreferencesDialog(QDialog):
         group.setLayout(layout)
         parent_layout.addWidget(group)
     
+    def _create_volume_tab(self):
+        """Create the 3D volume annotation settings tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        scan_group = QGroupBox("Volume Scan Folder")
+        scan_layout = QGridLayout()
+        scan_desc = QLabel("Default folder for slice stacks (slice_NNNN.tif):")
+        scan_desc.setWordWrap(True)
+        scan_layout.addWidget(scan_desc, 0, 0, 1, 3)
+        self.volume_scan_dir_edit = QLineEdit()
+        self.volume_scan_dir_edit.setReadOnly(True)
+        self.volume_scan_dir_edit.setPlaceholderText("No scan folder selected...")
+        scan_layout.addWidget(self.volume_scan_dir_edit, 1, 0, 1, 2)
+        scan_browse = QPushButton("Browse...")
+        scan_browse.clicked.connect(self._browse_volume_scan_dir)
+        scan_layout.addWidget(scan_browse, 1, 2)
+        scan_group.setLayout(scan_layout)
+        layout.addWidget(scan_group)
+
+        ann_group = QGroupBox("Annotations Output Folder")
+        ann_layout = QGridLayout()
+        ann_desc = QLabel("Folder for label memmaps and NIfTI exports (_seg.nii.gz):")
+        ann_desc.setWordWrap(True)
+        ann_layout.addWidget(ann_desc, 0, 0, 1, 3)
+        self.annotations_output_dir_edit = QLineEdit()
+        self.annotations_output_dir_edit.setReadOnly(True)
+        self.annotations_output_dir_edit.setPlaceholderText("No output folder selected...")
+        ann_layout.addWidget(self.annotations_output_dir_edit, 1, 0, 1, 2)
+        ann_browse = QPushButton("Browse...")
+        ann_browse.clicked.connect(self._browse_annotations_output_dir)
+        ann_layout.addWidget(ann_browse, 1, 2)
+        ann_group.setLayout(ann_layout)
+        layout.addWidget(ann_group)
+
+        spacing_group = QGroupBox("Voxel Spacing (NIfTI export)")
+        spacing_layout = QGridLayout()
+        spacing_layout.addWidget(QLabel("X:"), 0, 0)
+        self.voxel_spacing_x = QDoubleSpinBox()
+        self.voxel_spacing_x.setRange(0.0001, 10000.0)
+        self.voxel_spacing_x.setDecimals(4)
+        self.voxel_spacing_x.setValue(1.0)
+        spacing_layout.addWidget(self.voxel_spacing_x, 0, 1)
+        spacing_layout.addWidget(QLabel("Y:"), 0, 2)
+        self.voxel_spacing_y = QDoubleSpinBox()
+        self.voxel_spacing_y.setRange(0.0001, 10000.0)
+        self.voxel_spacing_y.setDecimals(4)
+        self.voxel_spacing_y.setValue(1.0)
+        spacing_layout.addWidget(self.voxel_spacing_y, 0, 3)
+        spacing_layout.addWidget(QLabel("Z:"), 1, 0)
+        self.voxel_spacing_z = QDoubleSpinBox()
+        self.voxel_spacing_z.setRange(0.0001, 10000.0)
+        self.voxel_spacing_z.setDecimals(4)
+        self.voxel_spacing_z.setValue(1.0)
+        spacing_layout.addWidget(self.voxel_spacing_z, 1, 1)
+        spacing_info = QLabel("Physical size per voxel in exported NIfTI files (mm or µm).")
+        spacing_info.setWordWrap(True)
+        spacing_info.setStyleSheet("font-size: 10px; color: #666666;")
+        spacing_layout.addWidget(spacing_info, 2, 0, 1, 4)
+        spacing_group.setLayout(spacing_layout)
+        layout.addWidget(spacing_group)
+
+        ui_group = QGroupBox("3D UI Defaults")
+        ui_layout = QGridLayout()
+        ui_layout.addWidget(QLabel("Default tab on startup:"), 0, 0)
+        self.default_mode_combo = QComboBox()
+        self.default_mode_combo.addItem("2D Bounding Box", "2d")
+        self.default_mode_combo.addItem("3D Volume", "3d")
+        ui_layout.addWidget(self.default_mode_combo, 0, 1)
+        ui_layout.addWidget(QLabel("Default brush radius:"), 1, 0)
+        self.volume_brush_spinbox = QSpinBox()
+        self.volume_brush_spinbox.setRange(1, 128)
+        self.volume_brush_spinbox.setValue(8)
+        ui_layout.addWidget(self.volume_brush_spinbox, 1, 1)
+        ui_group.setLayout(ui_layout)
+        layout.addWidget(ui_group)
+
+        layout.addStretch()
+        return widget
+
     def _create_general_tab(self):
         """Create the general settings tab."""
         widget = QWidget()
@@ -471,6 +567,28 @@ class PreferencesDialog(QDialog):
             self._answers_folder = folder_path
             self.answers_folder_edit.setText(folder_path)
     
+    def _browse_volume_scan_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Volume Scan Folder",
+            self._volume_scan_dir or os.getcwd(),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if directory:
+            self._volume_scan_dir = directory
+            self.volume_scan_dir_edit.setText(directory)
+
+    def _browse_annotations_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Annotations Output Folder",
+            self._annotations_output_dir or os.getcwd(),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if directory:
+            self._annotations_output_dir = directory
+            self.annotations_output_dir_edit.setText(directory)
+
     def _browse_settings_file(self):
         """Browse for settings file."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -608,6 +726,27 @@ class PreferencesDialog(QDialog):
         # Settings file path
         if self._settings_file_path:
             self.settings_file_path_changed.emit(self._settings_file_path)
+
+        # 3D volume settings
+        if self._volume_scan_dir:
+            self.volume_scan_dir_changed.emit(self._volume_scan_dir)
+
+        if self._annotations_output_dir:
+            self.annotations_output_dir_changed.emit(self._annotations_output_dir)
+
+        sx = self.voxel_spacing_x.value()
+        sy = self.voxel_spacing_y.value()
+        sz = self.voxel_spacing_z.value()
+        if (sx, sy, sz) != self._voxel_spacing:
+            self.voxel_spacing_changed.emit(sx, sy, sz)
+
+        mode = self.default_mode_combo.currentData()
+        if mode and mode != self._default_annotation_mode:
+            self.default_annotation_mode_changed.emit(mode)
+
+        brush = self.volume_brush_spinbox.value()
+        if brush != self._volume_brush_radius:
+            self.volume_brush_radius_changed.emit(brush)
         
         self.accept()
     
@@ -668,3 +807,27 @@ class PreferencesDialog(QDialog):
         """Set the current settings file path."""
         self._settings_file_path = file_path
         self.settings_file_edit.setText(file_path)
+
+    def set_volume_scan_dir(self, directory: str):
+        self._volume_scan_dir = directory or ""
+        self.volume_scan_dir_edit.setText(directory or "")
+
+    def set_annotations_output_dir(self, directory: str):
+        self._annotations_output_dir = directory or ""
+        self.annotations_output_dir_edit.setText(directory or "")
+
+    def set_voxel_spacing(self, sx: float, sy: float, sz: float):
+        self._voxel_spacing = (sx, sy, sz)
+        self.voxel_spacing_x.setValue(sx)
+        self.voxel_spacing_y.setValue(sy)
+        self.voxel_spacing_z.setValue(sz)
+
+    def set_default_annotation_mode(self, mode: str):
+        self._default_annotation_mode = mode if mode in ("2d", "3d") else "2d"
+        idx = self.default_mode_combo.findData(self._default_annotation_mode)
+        if idx >= 0:
+            self.default_mode_combo.setCurrentIndex(idx)
+
+    def set_volume_brush_radius(self, radius: int):
+        self._volume_brush_radius = max(1, min(128, int(radius)))
+        self.volume_brush_spinbox.setValue(self._volume_brush_radius)

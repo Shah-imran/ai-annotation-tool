@@ -17,5 +17,7 @@ x64/
 *.npz
 *.npy
 build/
-
+sample scan/
 settings/settings.json
+sample scan/annotations/
+*_labels.dat

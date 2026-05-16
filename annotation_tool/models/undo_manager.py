@@ -13,6 +13,7 @@ class ActionType(Enum):
     MODIFY_ANNOTATION = "modify_annotation"
     CLEAR_ALL = "clear_all"
     COPY_BOXES_TO_NEXT = "copy_boxes_to_next"
+    VOLUME_PAINT_STROKE = "volume_paint_stroke"
 
 
 class UndoAction:

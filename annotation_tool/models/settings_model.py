@@ -157,7 +157,16 @@ class SettingsModel(QObject):
         try:
             if os.path.exists(self._settings_file):
                 with open(self._settings_file, 'r', encoding='utf-8') as f:
-                    self._settings = json.load(f)
+                    raw = json.load(f)
+                keys_from_file = set(raw.keys())
+                self._settings = raw
+                defaults = self._get_default_settings()
+                for key, value in defaults.items():
+                    if key not in self._settings:
+                        self._settings[key] = value
+                if "volume_preview_stride_z" not in keys_from_file or "volume_preview_stride_xy" not in keys_from_file:
+                    self._backfill_volume_preview_strides_from_level()
+                    self._save_settings()
             else:
                 # Initialize with default settings
                 self._settings = self._get_default_settings()
@@ -201,7 +210,26 @@ class SettingsModel(QObject):
             "qa_questions_file": "",
             "qa_answers_folder": "",
             "recent_qa_questions_files": [],
-            "recent_qa_answers_folders": []
+            "recent_qa_answers_folders": [],
+            # Volume / 3D annotation
+            "last_annotation_mode": "2d",
+            "last_volume_scan_dir": "",
+            "last_volume_slice_index": 0,
+            "annotations_output_directory": "",
+            "voxel_spacing": [1.0, 1.0, 1.0],
+            "volume_brush_radius": 8,
+            "volume_class_id": 1,
+            "volume_splitter_vertical": [280, 520],
+            "volume_splitter_horizontal": [800, 320],
+            "volume_preview_collapsed": False,
+            "volume_slice_collapsed": False,
+            "volume_preview_level": 5,
+            "volume_preview_limit_z_range": False,
+            "volume_preview_z_start": 0,
+            "volume_preview_z_end": -1,
+            "volume_preview_native_resolution": False,
+            "volume_preview_stride_z": 1,
+            "volume_preview_stride_xy": 1,
         }
     
     # Image directory settings
@@ -322,7 +350,193 @@ class SettingsModel(QObject):
         if width > 0:
             self._settings["sidebar_width"] = width
             self._save_settings()
-    
+
+    # Volume / 3D annotation settings
+    def get_last_annotation_mode(self) -> str:
+        return self._settings.get("last_annotation_mode", "2d")
+
+    def set_last_annotation_mode(self, mode: str):
+        if mode in ("2d", "3d"):
+            self._settings["last_annotation_mode"] = mode
+            self._save_settings()
+
+    def get_last_volume_scan_dir(self) -> str:
+        return self._settings.get("last_volume_scan_dir", "")
+
+    def set_last_volume_scan_dir(self, directory: str):
+        if directory and os.path.isdir(directory):
+            self._settings["last_volume_scan_dir"] = directory
+            self._save_settings()
+
+    def get_annotations_output_directory(self) -> str:
+        return self._settings.get("annotations_output_directory", "")
+
+    def set_annotations_output_directory(self, directory: str):
+        if directory:
+            normalized = os.path.normpath(directory)
+            self._settings["annotations_output_directory"] = normalized
+            self._save_settings()
+
+    def get_last_volume_slice_index(self) -> int:
+        try:
+            return max(0, int(self._settings.get("last_volume_slice_index", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_last_volume_slice_index(self, index: int):
+        try:
+            self._settings["last_volume_slice_index"] = max(0, int(index))
+            self._save_settings()
+        except (TypeError, ValueError):
+            pass
+
+    def get_volume_brush_radius(self) -> int:
+        try:
+            return max(1, min(128, int(self._settings.get("volume_brush_radius", 8))))
+        except (TypeError, ValueError):
+            return 8
+
+    def set_volume_brush_radius(self, radius: int):
+        try:
+            self._settings["volume_brush_radius"] = max(1, min(128, int(radius)))
+            self._save_settings()
+        except (TypeError, ValueError):
+            pass
+
+    def get_volume_class_id(self) -> int:
+        try:
+            return max(0, int(self._settings.get("volume_class_id", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def set_volume_class_id(self, class_id: int):
+        try:
+            self._settings["volume_class_id"] = max(0, int(class_id))
+            self._save_settings()
+        except (TypeError, ValueError):
+            pass
+
+    def get_volume_splitter_vertical(self) -> list:
+        return list(self._settings.get("volume_splitter_vertical", [280, 520]))
+
+    def get_volume_splitter_horizontal(self) -> list:
+        return list(self._settings.get("volume_splitter_horizontal", [800, 320]))
+
+    def set_volume_splitter_vertical(self, sizes: list) -> None:
+        if len(sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in sizes):
+            self._settings["volume_splitter_vertical"] = [int(sizes[0]), int(sizes[1])]
+            self._save_settings()
+
+    def set_volume_splitter_horizontal(self, sizes: list) -> None:
+        if len(sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in sizes):
+            self._settings["volume_splitter_horizontal"] = [int(sizes[0]), int(sizes[1])]
+            self._save_settings()
+
+    def get_volume_preview_collapsed(self) -> bool:
+        return bool(self._settings.get("volume_preview_collapsed", False))
+
+    def get_volume_slice_collapsed(self) -> bool:
+        return bool(self._settings.get("volume_slice_collapsed", False))
+
+    def set_volume_preview_collapsed(self, collapsed: bool) -> None:
+        self._settings["volume_preview_collapsed"] = bool(collapsed)
+        self._save_settings()
+
+    def set_volume_slice_collapsed(self, collapsed: bool) -> None:
+        self._settings["volume_slice_collapsed"] = bool(collapsed)
+        self._save_settings()
+
+    def get_volume_preview_level(self) -> int:
+        if "volume_preview_level" in self._settings:
+            try:
+                return max(1, min(5, int(self._settings["volume_preview_level"])))
+            except (TypeError, ValueError):
+                pass
+        if "volume_preview_quality" in self._settings:
+            q = self._settings.get("volume_preview_quality")
+            if q == "fast":
+                return 2
+            if q == "full":
+                return 5
+        return 5
+
+    def set_volume_preview_level(self, level: int) -> None:
+        self._settings["volume_preview_level"] = max(1, min(5, int(level)))
+        self._save_settings()
+
+    def _backfill_volume_preview_strides_from_level(self) -> None:
+        """Map legacy 1–5 quality to Z / XY stride (called once when upgrading settings file)."""
+        try:
+            lev = max(1, min(5, int(self._settings.get("volume_preview_level", 5))))
+        except (TypeError, ValueError):
+            lev = 5
+        z_map = {5: 1, 4: 1, 3: 2, 2: 2, 1: 4}
+        xy_map = {5: 1, 4: 2, 3: 4, 2: 8, 1: 12}
+        self._settings["volume_preview_stride_z"] = z_map.get(lev, 1)
+        self._settings["volume_preview_stride_xy"] = xy_map.get(lev, 1)
+
+    def get_volume_preview_stride_z(self) -> int:
+        try:
+            return max(1, min(32, int(self._settings.get("volume_preview_stride_z", 1))))
+        except (TypeError, ValueError):
+            return 1
+
+    def get_volume_preview_stride_xy(self) -> int:
+        try:
+            return max(1, min(32, int(self._settings.get("volume_preview_stride_xy", 1))))
+        except (TypeError, ValueError):
+            return 1
+
+    def set_volume_preview_stride_z(self, stride: int) -> None:
+        self._settings["volume_preview_stride_z"] = max(1, min(32, int(stride)))
+        self._save_settings()
+
+    def set_volume_preview_stride_xy(self, stride: int) -> None:
+        self._settings["volume_preview_stride_xy"] = max(1, min(32, int(stride)))
+        self._save_settings()
+
+    def get_volume_preview_limit_z_range(self) -> bool:
+        return bool(self._settings.get("volume_preview_limit_z_range", False))
+
+    def set_volume_preview_limit_z_range(self, enabled: bool) -> None:
+        self._settings["volume_preview_limit_z_range"] = bool(enabled)
+        self._save_settings()
+
+    def get_volume_preview_z_start(self) -> int:
+        try:
+            return max(0, int(self._settings.get("volume_preview_z_start", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_volume_preview_z_start(self, index: int) -> None:
+        self._settings["volume_preview_z_start"] = max(0, int(index))
+        self._save_settings()
+
+    def get_volume_preview_z_end(self) -> int:
+        try:
+            return int(self._settings.get("volume_preview_z_end", -1))
+        except (TypeError, ValueError):
+            return -1
+
+    def set_volume_preview_z_end(self, index: int) -> None:
+        self._settings["volume_preview_z_end"] = int(index)
+        self._save_settings()
+
+    def get_volume_preview_native_resolution(self) -> bool:
+        return bool(self._settings.get("volume_preview_native_resolution", False))
+
+    def set_volume_preview_native_resolution(self, enabled: bool) -> None:
+        self._settings["volume_preview_native_resolution"] = bool(enabled)
+        self._save_settings()
+
+    def get_voxel_spacing(self) -> list:
+        return self._settings.get("voxel_spacing", [1.0, 1.0, 1.0])
+
+    def set_voxel_spacing(self, spacing: list):
+        if len(spacing) == 3:
+            self._settings["voxel_spacing"] = [float(spacing[0]), float(spacing[1]), float(spacing[2])]
+            self._save_settings()
+
     # Helper methods
     def _add_to_recent_list(self, key: str, item: str):
         """Add item to recent list, maintaining max size."""
