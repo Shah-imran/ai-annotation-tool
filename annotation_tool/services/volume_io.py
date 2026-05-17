@@ -10,6 +10,10 @@ from typing import List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+from ..utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 SLICE_PATTERN = re.compile(r"slice_(\d+)\.tif{1,2}$", re.IGNORECASE)
 
 
@@ -175,21 +179,50 @@ def save_segmentation_nifti(
     voxel_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> None:
     """Save label volume as NIfTI (.nii.gz)."""
-    import nibabel as nib
+    try:
+        import nibabel as nib
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIfTI export requires nibabel. Install with: pip install nibabel"
+        ) from exc
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    affine = np.diag([voxel_spacing[0], voxel_spacing[1], voxel_spacing[2], 1.0])
-    data = np.asarray(label_volume, dtype=np.uint8)
-    img = nib.Nifti1Image(data, affine)
-    nib.save(img, output_path)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        affine = np.diag([voxel_spacing[0], voxel_spacing[1], voxel_spacing[2], 1.0])
+        data = np.asarray(label_volume, dtype=np.uint8)
+        img = nib.Nifti1Image(data, affine)
+        nib.save(img, output_path)
+        logger.info(
+            "Saved segmentation NIfTI %s shape=%s spacing=%s",
+            output_path,
+            data.shape,
+            voxel_spacing,
+        )
+    except Exception as exc:
+        logger.exception("Failed to save NIfTI to %s", output_path)
+        raise RuntimeError(f"Could not save NIfTI: {exc}") from exc
 
 
 def load_segmentation_nifti(path: str) -> np.ndarray:
     """Load label volume from NIfTI."""
-    import nibabel as nib
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"NIfTI file not found: {path}")
 
-    img = nib.load(path)
-    return np.asarray(img.dataobj, dtype=np.uint8)
+    try:
+        import nibabel as nib
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIfTI load requires nibabel. Install with: pip install nibabel"
+        ) from exc
+
+    try:
+        img = nib.load(path)
+        data = np.asarray(img.dataobj, dtype=np.uint8)
+        logger.info("Loaded segmentation NIfTI %s shape=%s", path, data.shape)
+        return data
+    except Exception as exc:
+        logger.exception("Failed to load NIfTI from %s", path)
+        raise RuntimeError(f"Could not load NIfTI: {exc}") from exc
 
 
 def save_intensity_nifti(

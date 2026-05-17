@@ -1,316 +1,247 @@
-# 3D Volume Preview — User Guide
+# 3D Volume Annotation — User Guide
 
-This guide walks you through using the 3D preview when annotating volumetric
-scans. It assumes you already have the tool installed and running.
+This guide covers the **full 3D volume annotation workflow**: loading scans, painting labels in 2D, using the 3D preview to navigate, saving work, and exporting results.
 
-If you're maintaining the codebase, see
-[`3d_preview_technical.md`](./3d_preview_technical.md) instead.
+For implementation details, see [`3d_preview_technical.md`](./3d_preview_technical.md).
 
 ---
 
-## 1. What the 3D preview is for
+## 1. Overview
 
-The 3D preview lets you see your whole scan as a single 3D object while you
-annotate. It's not the canvas you draw on — that's still the 2D slice
-viewer on the left. The 3D view is there to help you:
+| Area | What you use it for |
+|------|---------------------|
+| **2D slice viewer (left)** | Paint and erase voxel labels with the brush |
+| **Right control panel** | Scan I/O, slice navigation, classes, brush, display, 3D preview settings |
+| **3D preview window (separate)** | Orbit the volume, see slice position, adjust lighting, export snapshot/mesh |
 
-- **Understand where you are in the scan.** A highlighted plane shows the
-  current Z slice, so you always know where the 2D view sits inside the
-  volume.
-- **Find features fast.** Spot a small void, bump, or crack in 3D, then
-  jump the 2D viewer to that slice and annotate.
-- **Quality‑check your labels.** Toggle the mask overlay to see your
-  annotated voxels as colored points sitting on the volume.
+The 2D viewer is where annotation happens. The 3D preview helps you **find** structures and **check** labels — it does not replace the slice canvas.
 
 ---
 
-## 2. Switching into 3D mode
+## 2. Getting started
 
-1. Launch the app.
-2. At the top of the window, just under the menubar, you'll see two tabs:
+### Switch to 3D Volume mode
 
-   ```
-   ┌───────────────────────┬────────────────────┐
-   │  2D Bounding Boxes    │   3D Volume        │
-   └───────────────────────┴────────────────────┘
-   ```
+Under the menubar, click **3D Volume** (next to **2D Bounding Boxes**).
 
-3. Click **"3D Volume"**.
+The app pre-starts the 3D helper process in the background so the first preview builds faster.
 
-When you switch into 3D mode, the app quietly starts up the 3D preview
-helper in the background. You don't see anything happen — that's
-intentional. By the time you click "Start Preview" later, the helper is
-already loaded and warm, so the first preview comes up faster.
+### Load a scan
+
+1. **Load Scan Folder…** — choose a folder of `slice_*.tif` files.
+2. The 2D viewer shows the first slice; the panel shows slice count and scan id.
+
+Labels are stored automatically in a memmap file next to your annotations folder (`*_labels.dat`). You do not need to save before painting.
 
 ---
 
-## 3. Loading a scan
+## 3. Annotating in 2D (main workflow)
 
-1. On the right‑side control panel, click **"Load Scan Folder…"**.
-2. Pick the folder containing your TIFF stack (and optional label/segmentation files).
-3. The 2D slice viewer fills in immediately. The right panel's
-   **"3D Preview"** section shows: *"Loaded — click Start Preview"*.
+### Navigate slices
 
-The 3D view itself does **not** build automatically. Scans are big, and
-auto‑building every time would waste your time on previews you don't
-need. You decide when to build.
+- **Slice slider** or **Prev / Next** on the panel  
+- **A** / **D** keyboard shortcuts (prev / next)  
+- The **3D preview** shows a cyan plane at the current Z (after you build a preview)
 
----
+### Brush
 
-## 4. The two preview modes
+| Control | Action |
+|---------|--------|
+| **Radius** spin box | Brush size in pixels |
+| **Eraser** toggle (switch) | ON = erase to background (class 0); OFF = paint with selected class |
+| Mouse wheel (no Ctrl) | Change brush radius |
+| Left-drag | Paint or erase stroke |
 
-In the **"3D Preview"** section of the right panel, the **"Mode"**
-dropdown offers two choices:
+### Classes
 
-### Isosurface (opaque, lit)
+The **Class** dropdown lists every class from your classes file (except “background”, which is id 0).
 
-Best for: **seeing the shape and surface detail** of your sample.
+- Select a class **before** painting.
+- Each class has a **distinct overlay color** in the 2D viewer (classes 5, 6, 7… are supported — not limited to the first four).
+- Painted voxels use the **numeric class id** shown in the combo (e.g. `5: crack`).
 
-- Renders the dense material as a solid, lit surface (think clay sculpture).
-- Studio‑style three‑point lighting plus ambient occlusion shading make
-  small voids, bumps, and crevices visible by darkening the corners.
-- One color (neutral gray) so you focus on shape, not intensity.
+### Display (2D brightness & contrast)
 
-### Point cloud
+**Display Brightness & Contrast** affects how the **scan** looks in 2D (and what intensities feed the next 3D rebuild):
 
-Best for: **fast preview, large scans, X‑ray‑style transparency**.
+- **Brightness** — midpoint of the gray ramp  
+- **Contrast** — width of the intensity range mapped to gray  
+- **Reset Display** — auto contrast like a TIFF viewer  
 
-- Renders bright voxels as glowing dots in space.
-- You can see through the volume — useful when something is hidden
-  inside.
-- Much cheaper to build than a mesh, so it's the right pick when you're
-  scrolling around exploring or when your scan is huge.
+Adjust these until features are visible, then rebuild 3D if needed.
 
-You can change mode anytime. If a build is in progress, the panel
-disables most controls until it finishes — just wait or hit Cancel.
+### Undo
 
----
-
-## 5. Building your first 3D preview
-
-1. Pick a **Mode** (see above).
-2. (Optional) Adjust **Z stride** and **XY stride** under "Sampling":
-   - **Stride 1** = use every slice / every pixel. Best quality, most
-     RAM and CPU.
-   - **Stride 2–4** = much faster, mild quality loss. Good for first‑pass
-     exploration.
-   - **Native resolution** checkbox forces stride 1×1×1 regardless.
-3. Click **"Start Preview"**.
-4. The status box shows progress in real time:
-   - *"Loading slice stack…"*
-   - *"Slice stack ready — preparing 3D display…"*
-   - *"Mesh build (CPU thread) → GPU draw (chunked)."*
-   - Finally: *"Isosurface (opaque) ready · Stride 2 · …"*
-
-The 3D window will pop up on its own when you have an active preview.
-You can hide it any time and reopen with **"Show 3D Window"** /
-**"Hide 3D Window"**.
-
-> **Tip:** if the main app feels sluggish during very large native
-> builds, that's actually the preview helper using your CPU — the main
-> annotation window stays responsive because the heavy work runs in a
-> separate process.
+Brush strokes support undo/redo via the main menu (when wired) or your usual shortcuts if enabled in your build.
 
 ---
 
-## 6. Navigating the 3D view
+## 4. Using the 3D preview
 
-The 3D window is a standard PyVista orbit view.
+### Build a preview
 
-| Action | Mouse / key |
-|---|---|
-| Orbit | Left‑drag |
-| Zoom | Mouse wheel |
-| Pan | Middle‑drag, or Shift + Left‑drag |
-| Reset view | Press **Home**, or click "Reset Orientation" in the panel |
-| Move the 2D slice indicator | Scroll the 2D viewer's slider; the 3D plane follows |
+1. In **3D Preview** on the right panel, choose **Mode**:
+   - **Isosurface (opaque, lit)** — solid surface, best for shape and voids  
+   - **Point cloud** — fast, see-through dots  
+2. Set **Z stride** / **XY stride** (higher = faster, lower resolution).  
+3. Click **Start preview**.  
+4. Click **Show 3D window** if the window is hidden.
 
-There's also a **"Reset Orientation"** button on the right panel that
-does the same thing as the Home key.
+Status text on the panel shows progress; the main window stays responsive (work runs in a separate process).
 
-### The current slice plane
+### Mode-specific options
 
-The blue translucent rectangle inside the 3D view is the slice you're
-currently looking at in the 2D viewer. When you scrub the 2D slice
-slider, the plane moves in 3D too — so you always know which Z you're
-annotating.
+**Isosurface**
+
+- **Surface color** — click the color swatch to pick mesh color (default light gray).  
+- Rebuild after changing color.
+
+**Point cloud**
+
+- **Density** (1–5), **Point size**, **Threshold** (or auto from density).
+
+### 3D window controls
+
+| Control | Effect |
+|---------|--------|
+| Left-drag | Orbit |
+| Wheel | Zoom |
+| Middle-drag / Shift+drag | Pan |
+| **Home** | Reset camera |
+| **Brightness** slider (bottom) | Scene lighting (instant, no rebuild) |
+| **Save snapshot…** | High-res PNG (3× resolution) |
+| **Export 3D model…** | STL / OBJ / VTP / PLY / VTK of the isosurface mesh |
+
+**Export notes**
+
+- **Snapshot** — works whenever the 3D view is visible.  
+- **3D model** — only after an **isosurface** build (not point cloud).  
+- Files are written where you choose in the save dialog (defaults to your home folder).
+
+### Slice plane in 3D
+
+When you change the 2D slice, the cyan plane in 3D moves to match — use this to relate 2D edits to 3D structure.
+
+### Label overlay in 3D
+
+Enable **Show label overlay** before starting a preview to see annotated voxels as colored points in the 3D scene.
 
 ---
 
-## 7. The brightness slider (new)
+## 5. Recommended annotation flow
 
-The 3D preview window has a thin strip at the bottom:
-
-```
-Brightness  ────●──────────  100%   [Reset]
+```text
+Load scan
+    → Tune 2D brightness/contrast
+    → Point cloud preview (stride 2) for quick overview
+    → Find region of interest in 3D; note Z range
+    → (Optional) Limit preview to slice range
+    → Isosurface preview for detail
+    → Paint class-by-class in 2D (toggle Eraser off/on)
+    → Toggle label overlay in 3D to QC
+    → Save labels + Export NIfTI when done
 ```
 
-What it does:
-
-- Slides every light in the 3D scene up or down in intensity.
-- Range 10% (very dark) to 250% (very bright).
-- 100% is the default. Click **Reset** to snap back.
-
-When is this useful?
-
-- You're using **Isosurface (opaque, lit)** and the inside of a void looks
-  too dark to read. Boost to ~140% to brighten the rim lights.
-- The default is too punchy for a particular sample. Drop to ~70% for a
-  softer, more cinematic look.
-- You want a flat, almost X‑ray look on a point cloud. Raise above 150%
-  and the dots glow against the dark background.
-
-The slider takes effect **instantly** — no rebuild, no waiting. It
-doesn't change your data, only how it's lit.
-
-> **Note:** the brightness setting is per‑session. It resets to 100% when
-> you reopen the app. If you find yourself always nudging it the same
-> way, mention it and we'll add a default.
+1. **Explore** with point cloud + strides.  
+2. **Refine** with isosurface on the Z range you care about.  
+3. **Annotate** in 2D, switching classes from the dropdown.  
+4. **QC** with 3D overlay and slice plane.  
+5. **Save** and **export**.
 
 ---
 
-## 8. Display Brightness & Contrast (2D — and what it does to the preview)
+## 6. Saving and loading
 
-Below the navigation section on the right panel you'll see:
+### Save labels (session)
 
-```
-Display Brightness & Contrast
-   Brightness (midpoint)  ────●───────────
-   Contrast width         ──●─────────────
-   [Reset Display]
-```
+**Save Labels** writes:
 
-This is the same control medical viewers call **Window / Level**:
+- The memmap label volume (already on disk; this flushes it)  
+- `*_meta.json` with scan id, shape, class names, voxel spacing  
 
-- **Brightness (midpoint)** = the intensity that ends up as mid‑gray
-  on screen. Slide right to brighten the image.
-- **Contrast width** = how wide a range of intensities gets spread across
-  the gray scale. Smaller width = more contrast, more punch. Larger
-  width = softer, flatter look.
+Use this often during long sessions.
 
-Two important things:
+### Export NIfTI segmentation
 
-1. **It changes the 2D slice viewer immediately** so you can see exactly
-   what's happening as you drag.
-2. **It also changes what the 3D preview will look like next time you
-   rebuild.** The 3D preview converts your raw scan to grayscale using
-   the same brightness/contrast you've set. So if your scan looks washed
-   out in 2D, your isosurface will too — adjust here first, then hit
-   *Start Preview*.
+**Export NIfTI Segmentation…** saves `uint8` labels as `.nii.gz` with voxel spacing from preferences.
 
-**Reset Display** restores the auto‑picked default (similar to how a
-TIFF viewer auto‑contrasts on open).
+- Default path: annotations folder, `{scan_id}_seg.nii.gz`  
+- Shape must match the loaded scan  
+
+### Load NIfTI segmentation
+
+**Load NIfTI Segmentation…** replaces the current label volume from a `.nii.gz` or `.nii` file.
+
+- Scan must already be loaded  
+- File shape must match `(Z, H, W)` of the scan  
+- On success, the 2D overlay updates immediately  
+
+### Auto-load on scan open
+
+If `{scan_id}_seg.nii.gz` exists in the annotations folder when you load that scan, it is imported automatically.
 
 ---
 
-## 9. Typical annotation flow
+## 7. File layout (typical)
 
-A good rhythm for annotating with the 3D preview running:
+```text
+annotations/
+  myscan_labels.dat      # memmap labels (binary)
+  myscan_meta.json       # metadata
+  myscan_seg.nii.gz      # exported segmentation (optional)
+```
 
-1. **Load** the scan.
-2. Click **"3D Volume"** if you weren't already there.
-3. **Adjust 2D brightness/contrast** until features are clearly visible
-   in the slice viewer.
-4. Pick **Mode = Point cloud** with **Z stride = 2, XY stride = 2** and
-   hit **Start Preview** — this is fast and gives you a rough overview.
-5. Orbit the 3D view, find the area you want to label.
-6. Note which Z range matters. Scrub the 2D viewer there.
-7. (Optional) Switch to **Isosurface (opaque, lit)**, click **Start
-   Preview** again for the detailed shape.
-8. (Optional) Crank the **Brightness** slider in the 3D window to peek
-   inside dark cavities.
-9. Annotate in the 2D viewer. The 3D plane indicator follows you.
-10. Toggle **"Show Mask Overlay"** to see your labels in 3D as colored
-    dots layered on top of the gray volume. Spot any misses — go fix
-    them in 2D.
-11. **Save Labels**. Repeat.
+Logs (if enabled): `logs/annotation_tool.log` in the working directory.
+
+---
+
+## 8. Keyboard shortcuts (3D volume mode)
+
+| Key | Action |
+|-----|--------|
+| A / D | Previous / next slice |
+| Ctrl+S | Save labels (if bound in your build) |
+| Wheel | Brush size |
+| Ctrl+wheel | Zoom 2D slice |
+| Middle-drag | Pan 2D |
+| Home (2D focused) | Reset 2D zoom |
+| Home (3D window focused) | Reset 3D camera |
+
+---
+
+## 9. Troubleshooting
+
+### Class 5+ paints but I don’t see color
+
+Fixed in current builds: overlay colors are generated for all class ids up to 255. Rebuild the app if you still only see four colors.
+
+### Eraser still paints a color
+
+Turn **Eraser** ON (green switch). When ON, strokes set voxels to background (0).
+
+### Start Preview grayed out
+
+A build is running, or the child process failed. Click **Stop**, or switch to 2D and back to 3D to reset. Check `logs/annotation_tool.log`.
+
+### NIfTI export/load fails
+
+- Install: `pip install nibabel`  
+- Shape must match the scan exactly  
+- See status message on the main window for the exact error  
+
+### Export 3D model disabled / fails
+
+Build an **Isosurface** preview first. Point clouds are not exported as a single surface mesh.
+
+### 3D snapshot is black
+
+Rotate the model into view, increase **Brightness** in the 3D window, then save again.
 
 ---
 
 ## 10. Performance tips
 
-- **Use strides liberally.** Native resolution is gorgeous but most
-  decisions don't need it. Stride 2 in Z and XY is roughly an 8× speedup
-  for a barely‑perceptible loss on slice‑plane features.
-- **Point cloud first, isosurface second.** A point cloud build is
-  multiples faster than a mesh; use it to navigate, then upgrade.
-- **Hide the 3D window** when you're not looking at it. The build
-  process keeps running on its own; hiding only changes whether you see
-  it. But on Intel iGPUs, having the 3D window visible does cost a small
-  amount of GPU time per frame.
-- **Don't fight a slow build.** If the status text says it's working,
-  it's working — in another process. Your annotation UI stays
-  responsive. Take advantage of that and keep annotating in 2D while
-  the 3D preview catches up.
-
----
-
-## 11. Keyboard reference
-
-| In | Key | Action |
-|---|---|---|
-| Main window | Tab through the 2D/3D tab strip | Switch mode |
-| 2D viewer | `Ctrl` + mouse wheel | Zoom in/out |
-| 2D viewer | Middle‑mouse drag | Pan |
-| 2D viewer | `Home` | Reset zoom to fit |
-| 3D window | Left‑drag | Orbit |
-| 3D window | Wheel | Zoom |
-| 3D window | Middle‑drag / `Shift` + drag | Pan |
-| 3D window | `Home` | Reset 3D camera orientation |
-
----
-
-## 12. Troubleshooting
-
-### "Start Preview" is grayed out
-
-A build is already running. Either wait, click **Cancel**, or — if the
-button stays grayed for more than ~30 s with no progress text — the
-3D helper may have crashed. Switching to 2D mode and back to 3D mode
-will reset everything.
-
-### The 3D window won't open
-
-Click **"Show 3D Window"** on the right panel. If it still doesn't
-appear, check whether anti‑virus or sandboxing on your machine is
-blocking the helper process. The status box should show an error in
-that case.
-
-### The 3D preview looks too dark / too bright
-
-Use the **Brightness slider at the bottom of the 3D window**. If that
-isn't enough, adjust **Display Brightness & Contrast** on the right
-panel and hit **Start Preview** again — the underlying data mapping
-changes there.
-
-### My voids look filled in
-
-Increase **Contrast width** to *decrease* contrast, then hit **Start
-Preview** again. Counter‑intuitive, but voids show up best when the
-dense material isn't washed out into pure white. Alternatively, try the
-point‑cloud mode — voids appear as empty space between glowing dots.
-
-### "No surface at threshold" message in the 3D view
-
-Your isosurface threshold doesn't match anything in this scan. Adjust
-the **Brightness & Contrast** sliders (the 3D preview uses them to map
-intensities) and rebuild. The point‑cloud mode is also a good fallback
-because it doesn't rely on a single threshold.
-
----
-
-## 13. A note on what's happening behind the scenes
-
-When you click **Start Preview**:
-
-1. The right panel collects every setting and packages it for the
-   helper process.
-2. A separate Python process (started in the background when you
-   entered 3D mode) does the heavy lifting: reading TIFFs,
-   downsampling, building meshes, and rendering them with VTK.
-3. As it works, it sends back status updates that you see in the panel.
-4. The finished 3D model lives in that helper process. You see it
-   through the 3D window, which is also part of the helper.
-
-This is why your annotation UI doesn't freeze even on huge scans — the
-expensive work happens *next to* the main app, not *inside* it.
+- Use **Z stride 2**, **XY stride 2** for first-pass 3D.  
+- Use **point cloud** to scout; switch to **isosurface** for detail.  
+- **Native resolution** only when you need full grid quality (high RAM).  
+- Hide the 3D window when not needed to save GPU time.

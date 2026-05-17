@@ -17,6 +17,7 @@ Parent → Child:
   CLEAR         clear the 3D scene
   SHOW_WINDOW   show the child window
   HIDE_WINDOW   hide the child window
+  SET_PREVIEW_UI  brightness %, default export folders for snapshot/mesh
   SHUTDOWN      ask child to exit cleanly
 
 Child → Parent:
@@ -26,6 +27,7 @@ Child → Parent:
   FINISHED      build finished; carries final status text + summary
   FAILED        build failed; carries error message
   WINDOW_CLOSED user closed the 3D window
+  PREVIEW_UI_CHANGED  brightness % and/or export folder defaults changed
   LOG           debug/log line (string)
   BYE           child is exiting
 """
@@ -43,6 +45,7 @@ MSG_RESET_VIEW = "reset_view"
 MSG_CLEAR = "clear"
 MSG_SHOW_WINDOW = "show_window"
 MSG_HIDE_WINDOW = "hide_window"
+MSG_SET_PREVIEW_UI = "set_preview_ui"
 MSG_SHUTDOWN = "shutdown"
 
 MSG_READY = "ready"
@@ -51,6 +54,7 @@ MSG_STARTED = "started"
 MSG_FINISHED = "finished"
 MSG_FAILED = "failed"
 MSG_WINDOW_CLOSED = "window_closed"
+MSG_PREVIEW_UI_CHANGED = "preview_ui_changed"
 MSG_LOG = "log"
 MSG_BYE = "bye"
 

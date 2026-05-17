@@ -16,7 +16,10 @@ from ..services.volume_io import (
     save_volume_meta,
 )
 from ..services.preview_ipc import make_preview_inputs
+from ..utils.logging_config import get_logger
 from ..views.volume_workspace import VolumeWorkspace
+
+logger = get_logger(__name__)
 
 
 class VolumeController(QObject):
@@ -82,22 +85,16 @@ class VolumeController(QObject):
         self._panel.preview_rebuild_requested.connect(self._start_preview_build)
         self._panel.preview_stop_requested.connect(self._stop_preview_requested)
         self._panel.preview_reset_view_requested.connect(self._preview.reset_orientation)
-        self._panel.preview_show_window_requested.connect(self._preview.show_child_window)
-        self._panel.preview_hide_window_requested.connect(self._preview.hide_child_window)
         self._preview.render_finished.connect(self._on_vtk_render_finished, Qt.QueuedConnection)
         self._preview.render_stage.connect(self._panel.set_preview_status, Qt.QueuedConnection)
-        self._preview.child_window_visible_changed.connect(
-            self._panel.set_preview_window_visible
-        )
         self._preview.busy_changed.connect(self._on_preview_busy_changed)
-        # Initial sync — child isn't running yet, so buttons should reflect "hidden".
-        self._panel.set_preview_window_visible(False)
 
     def _refresh_class_list(self):
         names = self._get_class_names()
         if names:
             self._label_model.set_class_names(names)
         self._panel.update_class_list(self._label_model.class_names)
+        self._canvas.refresh_class_palette(len(self._label_model.class_names))
 
     def _label_memmap_path(self) -> str:
         scan_id = self._volume_model.scan_id or "scan"
@@ -138,7 +135,7 @@ class VolumeController(QObject):
                     self._label_model.load_from_array(data, label_path)
                     self.status_message.emit(f"Loaded existing segmentation: {os.path.basename(seg_path)}")
             except Exception as e:
-                print(f"Could not load seg: {e}")
+                logger.warning("Could not load existing seg %s: %s", seg_path, e)
 
         self._refresh_class_list()
         self._canvas.set_current_class_id(self._label_model.current_class_id)
@@ -427,12 +424,9 @@ class VolumeController(QObject):
     def can_redo(self) -> bool:
         return self._label_model.can_redo()
 
-    def _on_class_changed(self, combo_index: int):
-        class_id = self._panel.class_combo.itemData(combo_index)
-        if class_id is not None:
-            class_id = int(class_id)
-            self._label_model.set_current_class_id(class_id)
-            self._canvas.set_current_class_id(class_id)
+    def _on_class_changed(self, class_id: int):
+        if self._label_model.set_current_class_id(int(class_id)):
+            self._canvas.set_current_class_id(int(class_id))
 
     def _on_window_center_changed(self, center: float):
         self._volume_model.set_window_level(center, self._volume_model.window_width)
@@ -503,6 +497,7 @@ class VolumeController(QObject):
             self.status_message.emit(f"Exported {os.path.basename(path)}")
             return True
         except Exception as e:
+            logger.exception("NIfTI export failed")
             self.status_message.emit(f"Export failed: {e}")
             return False
 
@@ -532,6 +527,7 @@ class VolumeController(QObject):
             self.status_message.emit(f"Loaded {os.path.basename(path)}")
             return True
         except Exception as e:
+            logger.exception("NIfTI load failed for %s", path)
             self.status_message.emit(f"Load failed: {e}")
             return False
 

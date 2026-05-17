@@ -7,9 +7,10 @@ import json
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                             QPushButton, QLineEdit, QFileDialog, QGroupBox, 
                             QGridLayout, QMessageBox, QDialogButtonBox, QCheckBox,
-                            QSpinBox, QDoubleSpinBox, QTabWidget, QWidget, QComboBox)
+                            QSpinBox, QDoubleSpinBox, QTabWidget, QWidget, QComboBox,
+                            QScrollArea, QColorDialog)
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor
 
 
 class PreferencesDialog(QDialog):
@@ -32,6 +33,7 @@ class PreferencesDialog(QDialog):
     voxel_spacing_changed = pyqtSignal(float, float, float)
     default_annotation_mode_changed = pyqtSignal(str)  # "2d" or "3d"
     volume_brush_radius_changed = pyqtSignal(int)
+    volume_preview_defaults_changed = pyqtSignal(dict)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,6 +54,9 @@ class PreferencesDialog(QDialog):
         self._voxel_spacing = (1.0, 1.0, 1.0)
         self._default_annotation_mode = "2d"
         self._volume_brush_radius = 8
+        self._preview_iso_color = "#dcdcdc"
+        self._snapshot_export_dir = ""
+        self._mesh_export_dir = ""
         self._setup_ui()
     
     def _setup_ui(self):
@@ -296,6 +301,8 @@ class PreferencesDialog(QDialog):
     
     def _create_volume_tab(self):
         """Create the 3D volume annotation settings tab."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setSpacing(15)
@@ -358,6 +365,118 @@ class PreferencesDialog(QDialog):
         spacing_group.setLayout(spacing_layout)
         layout.addWidget(spacing_group)
 
+        export_group = QGroupBox("3D Preview Export Folders")
+        export_layout = QGridLayout()
+        export_layout.addWidget(QLabel("Default folder for snapshots (PNG):"), 0, 0, 1, 3)
+        self.snapshot_export_dir_edit = QLineEdit()
+        self.snapshot_export_dir_edit.setReadOnly(True)
+        self.snapshot_export_dir_edit.setPlaceholderText("Home folder (default)")
+        export_layout.addWidget(self.snapshot_export_dir_edit, 1, 0, 1, 2)
+        snap_browse = QPushButton("Browse...")
+        snap_browse.clicked.connect(self._browse_snapshot_export_dir)
+        export_layout.addWidget(snap_browse, 1, 2)
+        export_layout.addWidget(QLabel("Default folder for 3D model export:"), 2, 0, 1, 3)
+        self.mesh_export_dir_edit = QLineEdit()
+        self.mesh_export_dir_edit.setReadOnly(True)
+        self.mesh_export_dir_edit.setPlaceholderText("Home folder (default)")
+        export_layout.addWidget(self.mesh_export_dir_edit, 3, 0, 1, 2)
+        mesh_browse = QPushButton("Browse...")
+        mesh_browse.clicked.connect(self._browse_mesh_export_dir)
+        export_layout.addWidget(mesh_browse, 3, 2)
+        export_group.setLayout(export_layout)
+        layout.addWidget(export_group)
+
+        preview_group = QGroupBox("3D Preview Defaults")
+        preview_layout = QGridLayout()
+        row = 0
+        preview_layout.addWidget(QLabel("Render mode:"), row, 0)
+        self.pref_preview_mode_combo = QComboBox()
+        self.pref_preview_mode_combo.addItem("Isosurface (opaque, lit)", "isosurface_lit")
+        self.pref_preview_mode_combo.addItem("Point cloud", "point_cloud")
+        preview_layout.addWidget(self.pref_preview_mode_combo, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("Detail level (1–5):"), row, 0)
+        self.pref_preview_level_spin = QSpinBox()
+        self.pref_preview_level_spin.setRange(1, 5)
+        self.pref_preview_level_spin.setValue(5)
+        self.pref_preview_level_spin.setToolTip(
+            "Coarse (1) to fine (5). Sets default Z and XY stride sliders."
+        )
+        preview_layout.addWidget(self.pref_preview_level_spin, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("Z stride:"), row, 0)
+        self.pref_preview_stride_z = QSpinBox()
+        self.pref_preview_stride_z.setRange(1, 32)
+        self.pref_preview_stride_z.setValue(1)
+        preview_layout.addWidget(self.pref_preview_stride_z, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("XY stride:"), row, 0)
+        self.pref_preview_stride_xy = QSpinBox()
+        self.pref_preview_stride_xy.setRange(1, 32)
+        self.pref_preview_stride_xy.setValue(1)
+        preview_layout.addWidget(self.pref_preview_stride_xy, row, 1)
+        row += 1
+        self.pref_preview_native_check = QCheckBox("Native resolution (full grid, high RAM)")
+        preview_layout.addWidget(self.pref_preview_native_check, row, 0, 1, 2)
+        row += 1
+        self.pref_preview_limit_range_check = QCheckBox("Limit preview to slice range")
+        preview_layout.addWidget(self.pref_preview_limit_range_check, row, 0, 1, 2)
+        row += 1
+        preview_layout.addWidget(QLabel("From slice:"), row, 0)
+        self.pref_preview_z_start = QSpinBox()
+        self.pref_preview_z_start.setRange(1, 99999)
+        self.pref_preview_z_start.setValue(1)
+        preview_layout.addWidget(self.pref_preview_z_start, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("To slice:"), row, 0)
+        self.pref_preview_z_end = QSpinBox()
+        self.pref_preview_z_end.setRange(1, 99999)
+        self.pref_preview_z_end.setValue(1)
+        preview_layout.addWidget(self.pref_preview_z_end, row, 1)
+        row += 1
+        self.pref_preview_show_mask_check = QCheckBox("Show label overlay in 3D")
+        preview_layout.addWidget(self.pref_preview_show_mask_check, row, 0, 1, 2)
+        row += 1
+        preview_layout.addWidget(QLabel("Isosurface color:"), row, 0)
+        iso_row = QHBoxLayout()
+        self.pref_preview_iso_color_btn = QPushButton()
+        self.pref_preview_iso_color_btn.setFixedSize(40, 22)
+        self.pref_preview_iso_color_btn.clicked.connect(self._pick_pref_preview_iso_color)
+        iso_row.addWidget(self.pref_preview_iso_color_btn)
+        iso_row.addStretch(1)
+        iso_wrap = QWidget()
+        iso_wrap.setLayout(iso_row)
+        preview_layout.addWidget(iso_wrap, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("Point size:"), row, 0)
+        self.pref_preview_point_size = QDoubleSpinBox()
+        self.pref_preview_point_size.setRange(1.0, 20.0)
+        self.pref_preview_point_size.setSingleStep(0.5)
+        self.pref_preview_point_size.setValue(3.0)
+        preview_layout.addWidget(self.pref_preview_point_size, row, 1)
+        row += 1
+        self.pref_preview_point_threshold_auto = QCheckBox("Auto point-cloud threshold")
+        preview_layout.addWidget(self.pref_preview_point_threshold_auto, row, 0, 1, 2)
+        row += 1
+        preview_layout.addWidget(QLabel("Point threshold (0–255):"), row, 0)
+        self.pref_preview_point_threshold = QSpinBox()
+        self.pref_preview_point_threshold.setRange(0, 255)
+        self.pref_preview_point_threshold.setValue(25)
+        preview_layout.addWidget(self.pref_preview_point_threshold, row, 1)
+        row += 1
+        preview_layout.addWidget(QLabel("3D window brightness:"), row, 0)
+        self.pref_preview_brightness = QSpinBox()
+        self.pref_preview_brightness.setRange(10, 250)
+        self.pref_preview_brightness.setValue(100)
+        self.pref_preview_brightness.setSuffix(" %")
+        self.pref_preview_brightness.setToolTip(
+            "Default brightness for the separate 3D preview window (10–250%)."
+        )
+        preview_layout.addWidget(self.pref_preview_brightness, row, 1)
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+        self._refresh_pref_preview_iso_color_btn()
+
         ui_group = QGroupBox("3D UI Defaults")
         ui_layout = QGridLayout()
         ui_layout.addWidget(QLabel("Default tab on startup:"), 0, 0)
@@ -374,7 +493,8 @@ class PreferencesDialog(QDialog):
         layout.addWidget(ui_group)
 
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
 
     def _create_general_tab(self):
         """Create the general settings tab."""
@@ -589,6 +709,63 @@ class PreferencesDialog(QDialog):
             self._annotations_output_dir = directory
             self.annotations_output_dir_edit.setText(directory)
 
+    def _browse_snapshot_export_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Default Snapshot Export Folder",
+            self._snapshot_export_dir or os.path.expanduser("~"),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if directory:
+            self._snapshot_export_dir = directory
+            self.snapshot_export_dir_edit.setText(directory)
+
+    def _browse_mesh_export_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Default 3D Model Export Folder",
+            self._mesh_export_dir or os.path.expanduser("~"),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if directory:
+            self._mesh_export_dir = directory
+            self.mesh_export_dir_edit.setText(directory)
+
+    def _pick_pref_preview_iso_color(self):
+        initial = QColor(self._preview_iso_color or "#dcdcdc")
+        color = QColorDialog.getColor(initial, self, "Pick isosurface color")
+        if not color.isValid():
+            return
+        self._preview_iso_color = color.name()
+        self._refresh_pref_preview_iso_color_btn()
+
+    def _refresh_pref_preview_iso_color_btn(self):
+        hex_color = self._preview_iso_color or "#dcdcdc"
+        self.pref_preview_iso_color_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {hex_color}; border: 1px solid #666;"
+            f"  border-radius: 3px; }}"
+        )
+
+    def collect_volume_preview_defaults(self) -> dict:
+        return {
+            "mode": self.pref_preview_mode_combo.currentData(),
+            "level": self.pref_preview_level_spin.value(),
+            "stride_z": self.pref_preview_stride_z.value(),
+            "stride_xy": self.pref_preview_stride_xy.value(),
+            "native_resolution": self.pref_preview_native_check.isChecked(),
+            "limit_z_range": self.pref_preview_limit_range_check.isChecked(),
+            "z_start": self.pref_preview_z_start.value() - 1,
+            "z_end": self.pref_preview_z_end.value() - 1,
+            "show_mask": self.pref_preview_show_mask_check.isChecked(),
+            "iso_color": self._preview_iso_color,
+            "point_size": self.pref_preview_point_size.value(),
+            "point_threshold_auto": self.pref_preview_point_threshold_auto.isChecked(),
+            "point_threshold": self.pref_preview_point_threshold.value(),
+            "brightness_percent": self.pref_preview_brightness.value(),
+            "snapshot_dir": self._snapshot_export_dir,
+            "mesh_dir": self._mesh_export_dir,
+        }
+
     def _browse_settings_file(self):
         """Browse for settings file."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -747,6 +924,8 @@ class PreferencesDialog(QDialog):
         brush = self.volume_brush_spinbox.value()
         if brush != self._volume_brush_radius:
             self.volume_brush_radius_changed.emit(brush)
+
+        self.volume_preview_defaults_changed.emit(self.collect_volume_preview_defaults())
         
         self.accept()
     
@@ -831,3 +1010,31 @@ class PreferencesDialog(QDialog):
     def set_volume_brush_radius(self, radius: int):
         self._volume_brush_radius = max(1, min(128, int(radius)))
         self.volume_brush_spinbox.setValue(self._volume_brush_radius)
+
+    def set_volume_preview_defaults(self, prefs: dict) -> None:
+        mode = prefs.get("mode", "isosurface_lit")
+        idx = self.pref_preview_mode_combo.findData(mode)
+        if idx >= 0:
+            self.pref_preview_mode_combo.setCurrentIndex(idx)
+        self.pref_preview_level_spin.setValue(int(prefs.get("level", 5)))
+        self.pref_preview_stride_z.setValue(int(prefs.get("stride_z", 1)))
+        self.pref_preview_stride_xy.setValue(int(prefs.get("stride_xy", 1)))
+        self.pref_preview_native_check.setChecked(bool(prefs.get("native_resolution", False)))
+        self.pref_preview_limit_range_check.setChecked(bool(prefs.get("limit_z_range", False)))
+        z0 = max(0, int(prefs.get("z_start", 0)))
+        z1 = max(0, int(prefs.get("z_end", 0)))
+        self.pref_preview_z_start.setValue(z0 + 1)
+        self.pref_preview_z_end.setValue(max(z0 + 1, z1 + 1))
+        self.pref_preview_show_mask_check.setChecked(bool(prefs.get("show_mask", True)))
+        self._preview_iso_color = str(prefs.get("iso_color", "#dcdcdc"))
+        self._refresh_pref_preview_iso_color_btn()
+        self.pref_preview_point_size.setValue(float(prefs.get("point_size", 3.0)))
+        self.pref_preview_point_threshold_auto.setChecked(
+            bool(prefs.get("point_threshold_auto", True))
+        )
+        self.pref_preview_point_threshold.setValue(int(prefs.get("point_threshold", 25)))
+        self.pref_preview_brightness.setValue(int(prefs.get("brightness_percent", 100)))
+        self._snapshot_export_dir = str(prefs.get("snapshot_dir", "") or "")
+        self.snapshot_export_dir_edit.setText(self._snapshot_export_dir)
+        self._mesh_export_dir = str(prefs.get("mesh_dir", "") or "")
+        self.mesh_export_dir_edit.setText(self._mesh_export_dir)

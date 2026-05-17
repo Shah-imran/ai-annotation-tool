@@ -41,8 +41,6 @@ class VolumeControlPanel(QWidget):
     preview_rebuild_requested = pyqtSignal()
     preview_stop_requested = pyqtSignal()
     preview_reset_view_requested = pyqtSignal()
-    preview_show_window_requested = pyqtSignal()
-    preview_hide_window_requested = pyqtSignal()
     preview_mode_changed = pyqtSignal(str)
     preview_show_mask_changed = pyqtSignal(bool)
     preview_settings_changed = pyqtSignal()
@@ -84,6 +82,13 @@ class VolumeControlPanel(QWidget):
                 color: #666666;
             }
         """)
+        self._preview_status_title = ""
+        self._preview_status_detail = ""
+        self._preview_busy_anim = False
+        self._spinner_index = 0
+        self._spinner_chars = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+        self._status_spinner_timer = QTimer(self)
+        self._status_spinner_timer.timeout.connect(self._tick_preview_status_spinner)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -117,7 +122,7 @@ class VolumeControlPanel(QWidget):
         preview_layout = QVBoxLayout(preview_group)
         self.preview_status = QLabel("Load a scan to build preview")
         self.preview_status.setWordWrap(True)
-        self.preview_status.setMinimumHeight(72)
+        self.preview_status.setMinimumHeight(88)
         self.preview_status.setStyleSheet(
             "QLabel { background-color: #2a2a2a; color: #e8e8e8; "
             "padding: 8px; border-radius: 4px; font-size: 11px; }"
@@ -179,7 +184,6 @@ class VolumeControlPanel(QWidget):
         self._mode_param_stack.addWidget(self._build_iso_param_page())   # idx 0
         self._mode_param_stack.addWidget(self._build_point_param_page()) # idx 1
         preview_layout.addWidget(self._mode_param_stack)
-        self._sync_preview_mode_visibility()
 
         self.preview_native_check = QCheckBox("Native resolution (full grid, high RAM)")
         self.preview_native_check.setToolTip(
@@ -214,10 +218,29 @@ class VolumeControlPanel(QWidget):
         self.preview_z_end_spin.valueChanged.connect(self._emit_preview_settings_changed)
         range_row.addWidget(self.preview_z_end_spin)
         preview_layout.addLayout(range_row)
+
+        self._iso_color_hex = "#dcdcdc"
+        overlay_row = QHBoxLayout()
+        overlay_row.setContentsMargins(0, 0, 0, 0)
+        overlay_row.setSpacing(8)
         self.preview_mask_check = QCheckBox("Show label overlay")
         self.preview_mask_check.setChecked(True)
-        self.preview_mask_check.toggled.connect(self.preview_show_mask_changed.emit)
-        preview_layout.addWidget(self.preview_mask_check)
+        self.preview_mask_check.toggled.connect(self._on_preview_mask_toggled)
+        overlay_row.addWidget(self.preview_mask_check)
+        overlay_row.addStretch(1)
+        self._iso_color_label = QLabel("Color")
+        self._iso_color_label.setToolTip("Isosurface mesh color.")
+        overlay_row.addWidget(self._iso_color_label)
+        self.preview_iso_color_btn = QPushButton()
+        self.preview_iso_color_btn.setText("")
+        self.preview_iso_color_btn.setFixedSize(26, 18)
+        self.preview_iso_color_btn.setToolTip("Click to pick isosurface color.")
+        self.preview_iso_color_btn.clicked.connect(self._on_iso_color_clicked)
+        overlay_row.addWidget(self.preview_iso_color_btn)
+        preview_layout.addLayout(overlay_row)
+        self._refresh_iso_color_button()
+        self._sync_preview_mode_visibility()
+
         preview_btn_row = QHBoxLayout()
         self.preview_start_btn = QPushButton("Start preview")
         self.preview_start_btn.setToolTip(
@@ -233,27 +256,6 @@ class VolumeControlPanel(QWidget):
         preview_btn_row.addWidget(self.preview_start_btn)
         preview_btn_row.addWidget(self.preview_stop_btn)
         preview_layout.addLayout(preview_btn_row)
-
-        window_btn_row = QHBoxLayout()
-        self.preview_show_window_btn = QPushButton("Show 3D window")
-        self.preview_show_window_btn.setToolTip(
-            "Open or bring forward the separate 3D preview window."
-        )
-        self.preview_show_window_btn.clicked.connect(
-            self.preview_show_window_requested.emit
-        )
-        window_btn_row.addWidget(self.preview_show_window_btn)
-
-        self.preview_hide_window_btn = QPushButton("Hide 3D window")
-        self.preview_hide_window_btn.setToolTip(
-            "Hide the separate 3D preview window without stopping the build."
-        )
-        self.preview_hide_window_btn.setEnabled(False)
-        self.preview_hide_window_btn.clicked.connect(
-            self.preview_hide_window_requested.emit
-        )
-        window_btn_row.addWidget(self.preview_hide_window_btn)
-        preview_layout.addLayout(window_btn_row)
 
         self.preview_reset_view_btn = QPushButton("Reset 3D view")
         self.preview_reset_view_btn.setToolTip(
@@ -346,7 +348,7 @@ class VolumeControlPanel(QWidget):
         class_group = QGroupBox("Class")
         class_layout = QVBoxLayout(class_group)
         self.class_combo = QComboBox()
-        self.class_combo.currentIndexChanged.connect(self.class_changed.emit)
+        self.class_combo.currentIndexChanged.connect(self._on_class_combo_changed)
         class_layout.addWidget(self.class_combo)
         inner_layout.addWidget(class_group)
 
@@ -438,6 +440,14 @@ class VolumeControlPanel(QWidget):
             self.class_combo.addItem(f"{i}: {name}", i)
         self.class_combo.blockSignals(False)
 
+    def _on_class_combo_changed(self, combo_index: int) -> None:
+        """Emit the stored class id, not the combo row index."""
+        if combo_index < 0:
+            return
+        class_id = self.class_combo.itemData(combo_index)
+        if class_id is not None:
+            self.class_changed.emit(int(class_id))
+
     def set_brush_radius(self, radius: int) -> None:
         self.radius_spin.blockSignals(True)
         self.radius_spin.setValue(radius)
@@ -490,28 +500,29 @@ class VolumeControlPanel(QWidget):
         self._iso_color_hex = color.name()
         self._refresh_iso_color_button()
 
+    def is_preview_show_mask(self) -> bool:
+        return self.preview_mask_check.isChecked()
+
+    def set_preview_show_mask(self, enabled: bool) -> None:
+        self.preview_mask_check.blockSignals(True)
+        self.preview_mask_check.setChecked(bool(enabled))
+        self.preview_mask_check.blockSignals(False)
+
+    def _on_preview_mask_toggled(self, checked: bool) -> None:
+        self.preview_show_mask_changed.emit(bool(checked))
+        self._emit_preview_settings_changed()
+
     def _refresh_iso_color_button(self) -> None:
         if not hasattr(self, "preview_iso_color_btn"):
             return
         hex_color = self._iso_color_hex or "#dcdcdc"
-        text_color = self._readable_text_color(hex_color)
-        # Override the panel-wide green button styling for this swatch only.
+        # Small swatch only — override panel-wide green QPushButton styling.
         self.preview_iso_color_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {hex_color}; color: {text_color}; "
-            f"  border: 1px solid #555; border-radius: 4px; padding: 4px 8px; }}"
+            f"QPushButton {{ background-color: {hex_color}; border: 1px solid #666;"
+            f"  border-radius: 3px; min-width: 0; min-height: 0; padding: 0; }}"
             f"QPushButton:hover {{ border: 1px solid #aaa; }}"
-            f"QPushButton:disabled {{ color: #888; border: 1px solid #444; }}"
+            f"QPushButton:disabled {{ border: 1px solid #444; }}"
         )
-        self.preview_iso_color_btn.setText(hex_color.upper())
-
-    @staticmethod
-    def _readable_text_color(hex_color: str) -> str:
-        c = QColor(hex_color)
-        if not c.isValid():
-            return "#000000"
-        # Standard luminance threshold — dark text on light swatches, light on dark.
-        luminance = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255.0
-        return "#101010" if luminance > 0.55 else "#f0f0f0"
 
     def _on_iso_color_clicked(self) -> None:
         initial = QColor(self._iso_color_hex or "#dcdcdc")
@@ -582,25 +593,8 @@ class VolumeControlPanel(QWidget):
     # --- Mode-specific parameter page builders ---------------------------
 
     def _build_iso_param_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(4)
-
-        color_row = QHBoxLayout()
-        color_label = QLabel("Surface color")
-        color_label.setToolTip("Color of the rendered isosurface mesh.")
-        color_row.addWidget(color_label)
-        self._iso_color_hex = "#dcdcdc"
-        self.preview_iso_color_btn = QPushButton()
-        self.preview_iso_color_btn.setToolTip("Click to choose the isosurface color.")
-        self.preview_iso_color_btn.setMinimumWidth(60)
-        self.preview_iso_color_btn.setMinimumHeight(22)
-        self.preview_iso_color_btn.clicked.connect(self._on_iso_color_clicked)
-        color_row.addWidget(self.preview_iso_color_btn, 1)
-        layout.addLayout(color_row)
-        self._refresh_iso_color_button()
-        return page
+        # Isosurface options (color) live on the overlay row; no stacked page UI.
+        return QWidget()
 
     def _build_point_param_page(self) -> QWidget:
         page = QWidget()
@@ -695,7 +689,15 @@ class VolumeControlPanel(QWidget):
         if not hasattr(self, "_mode_param_stack"):
             return
         mode = self.get_preview_mode()
-        self._mode_param_stack.setCurrentIndex(0 if mode == "isosurface_lit" else 1)
+        is_iso = mode == "isosurface_lit"
+        # Point-cloud params only — hide the stack in isosurface mode (avoids empty margin).
+        self._mode_param_stack.setVisible(not is_iso)
+        if not is_iso:
+            self._mode_param_stack.setCurrentIndex(1)
+        if hasattr(self, "_iso_color_label"):
+            self._iso_color_label.setVisible(is_iso)
+        if hasattr(self, "preview_iso_color_btn"):
+            self.preview_iso_color_btn.setVisible(is_iso)
 
     def is_preview_native_resolution(self) -> bool:
         return self.preview_native_check.isChecked()
@@ -788,7 +790,42 @@ class VolumeControlPanel(QWidget):
         self.preview_settings_changed.emit()
 
     def set_preview_status(self, text: str) -> None:
-        self.preview_status.setText(text)
+        """Accept ``title`` or ``title\\ndetail`` (same format as the 3D child overlay)."""
+        raw = (text or "").strip()
+        if "\n" in raw:
+            title, detail = raw.split("\n", 1)
+            self._preview_status_title = title.strip()
+            self._preview_status_detail = detail.strip()
+        else:
+            self._preview_status_title = raw
+            self._preview_status_detail = ""
+        if self._preview_busy_anim:
+            self._refresh_preview_status_label()
+        else:
+            self._refresh_preview_status_label_static()
+
+    def _tick_preview_status_spinner(self) -> None:
+        if not self._preview_busy_anim:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(self._spinner_chars)
+        self._refresh_preview_status_label()
+
+    def _refresh_preview_status_label_static(self) -> None:
+        title = self._preview_status_title or "Building 3D preview…"
+        if self._preview_status_detail:
+            self.preview_status.setText(f"{title}\n{self._preview_status_detail}")
+        else:
+            self.preview_status.setText(title)
+
+    def _refresh_preview_status_label(self) -> None:
+        """Match child overlay: title line + spinner on detail (step-by-step GPU text)."""
+        frame = self._spinner_chars[self._spinner_index]
+        title = self._preview_status_title or "Building 3D preview…"
+        detail = self._preview_status_detail
+        if detail:
+            self.preview_status.setText(f"{title}\n{frame}  {detail}")
+        else:
+            self.preview_status.setText(f"{frame}  {title}")
 
     def set_preview_busy(self, busy: bool) -> None:
         self.preview_start_btn.setEnabled(not busy)
@@ -800,7 +837,9 @@ class VolumeControlPanel(QWidget):
         self.preview_native_check.setEnabled(not busy)
         is_pc = self.get_preview_mode() == "point_cloud"
         is_iso = not is_pc
-        # Isosurface params.
+        # Isosurface color (on overlay row).
+        if hasattr(self, "_iso_color_label"):
+            self._iso_color_label.setEnabled(not busy and is_iso)
         self.preview_iso_color_btn.setEnabled(not busy and is_iso)
         # Point-cloud params.
         self.preview_level_spin.setEnabled(not busy and is_pc)
@@ -809,8 +848,15 @@ class VolumeControlPanel(QWidget):
         self.preview_point_threshold_slider.setEnabled(
             not busy and is_pc and not self.preview_point_threshold_auto.isChecked()
         )
-
-    def set_preview_window_visible(self, visible: bool) -> None:
-        """Reflect the child 3D window's open/closed state in the buttons."""
-        self.preview_show_window_btn.setEnabled(not visible)
-        self.preview_hide_window_btn.setEnabled(bool(visible))
+        if busy:
+            if not self._preview_status_title:
+                self.set_preview_status(
+                    self.preview_status.text() or "Building 3D preview…"
+                )
+            self._preview_busy_anim = True
+            self._status_spinner_timer.start(120)
+            self._refresh_preview_status_label()
+        else:
+            self._preview_busy_anim = False
+            self._status_spinner_timer.stop()
+            self._refresh_preview_status_label_static()

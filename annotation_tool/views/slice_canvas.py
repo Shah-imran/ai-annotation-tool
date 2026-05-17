@@ -10,6 +10,7 @@ from PyQt5.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, 
 from PyQt5.QtWidgets import QWidget
 
 from ..services.volume_io import interpolate_brush_line, slice_to_display_u8
+from ..utils.class_colors import build_class_qcolors, build_class_rgba_lut, distinct_class_color
 
 
 class SliceCanvas(QWidget):
@@ -61,23 +62,15 @@ class SliceCanvas(QWidget):
         self._cursor_pos: Optional[QPoint] = None
         self._show_brush_cursor = False
 
-        self._class_colors = [
-            QColor(0, 0, 0, 0),
-            QColor(255, 80, 80, 140),
-            QColor(80, 255, 80, 140),
-            QColor(80, 120, 255, 140),
-            QColor(255, 255, 80, 140),
-        ]
-        self._color_lut = self._build_color_lut()
+        self._class_colors = build_class_qcolors(256)
+        self._color_lut = build_class_rgba_lut(256)
 
-    def _build_color_lut(self) -> np.ndarray:
-        """RGBA lookup table indexed by class id (fast overlay)."""
-        lut = np.zeros((256, 4), dtype=np.uint8)
-        for i, color in enumerate(self._class_colors):
-            if i >= 256:
-                break
-            lut[i] = (color.red(), color.green(), color.blue(), color.alpha())
-        return lut
+    def refresh_class_palette(self, num_classes=None) -> None:
+        """Rebuild overlay colors when the class list changes (supports id > 4)."""
+        del num_classes  # palette is fixed 256-entry; all ids stay visible
+        self._class_colors = build_class_qcolors(256)
+        self._color_lut = build_class_rgba_lut(256)
+        self.update()
 
     def set_brush_radius(self, radius: int) -> None:
         self._brush_radius = max(1, min(128, radius))
@@ -410,8 +403,7 @@ class SliceCanvas(QWidget):
             pen = QPen(QColor(255, 255, 255), 2, Qt.DashLine)
             fill = QColor(0, 200, 255, 55)
         else:
-            idx = min(self._current_class_id, len(self._class_colors) - 1)
-            color = self._class_colors[idx]
+            color = distinct_class_color(self._current_class_id)
             pen = QPen(color.lighter(130), 2, Qt.SolidLine)
             fill = QColor(color.red(), color.green(), color.blue(), 70)
 

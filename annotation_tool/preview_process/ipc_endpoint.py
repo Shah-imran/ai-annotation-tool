@@ -36,6 +36,7 @@ class ChildIpcEndpoint(QObject):
 
         self._window.user_closed.connect(self._on_window_closed)
         self._window.reset_view_clicked.connect(self._coord.reset_view)
+        self._window.preview_ui_changed.connect(self._on_preview_ui_changed)
 
         self._reconnect_attempts = 0
         self._reconnect_timer = QTimer(self)
@@ -112,6 +113,12 @@ class ChildIpcEndpoint(QObject):
             self._window.activateWindow()
         elif mtype == ipc.MSG_HIDE_WINDOW:
             self._window.hide()
+        elif mtype == ipc.MSG_SET_PREVIEW_UI:
+            self._window.apply_preview_ui(
+                brightness_percent=msg.get("brightness_percent"),
+                snapshot_dir=msg.get("snapshot_dir"),
+                mesh_dir=msg.get("mesh_dir"),
+            )
         elif mtype == ipc.MSG_SHUTDOWN:
             self._send({"type": ipc.MSG_BYE})
             from PyQt5.QtWidgets import QApplication
@@ -137,3 +144,8 @@ class ChildIpcEndpoint(QObject):
 
     def _on_window_closed(self) -> None:
         self._send({"type": ipc.MSG_WINDOW_CLOSED})
+
+    def _on_preview_ui_changed(self, payload: dict) -> None:
+        if not payload:
+            return
+        self._send({"type": ipc.MSG_PREVIEW_UI_CHANGED, **payload})

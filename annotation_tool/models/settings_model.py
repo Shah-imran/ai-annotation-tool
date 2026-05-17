@@ -236,6 +236,10 @@ class SettingsModel(QObject):
             "volume_preview_point_threshold_auto": True,
             "volume_preview_point_threshold": 25,          # 0–255
             "volume_preview_iso_color": "#dcdcdc",         # `#RRGGBB`, isosurface mesh color
+            "volume_preview_show_mask": True,
+            "volume_preview_brightness_percent": 100,      # 10–250, 100 = default
+            "volume_preview_export_snapshot_dir": "",
+            "volume_preview_export_mesh_dir": "",
         }
     
     # Image directory settings
@@ -596,6 +600,37 @@ class SettingsModel(QObject):
             except ValueError:
                 text = "#dcdcdc"
         self._settings["volume_preview_iso_color"] = text
+        self._save_settings()
+
+    def get_volume_preview_show_mask(self) -> bool:
+        return bool(self._settings.get("volume_preview_show_mask", True))
+
+    def set_volume_preview_show_mask(self, enabled: bool) -> None:
+        self._settings["volume_preview_show_mask"] = bool(enabled)
+        self._save_settings()
+
+    def get_volume_preview_brightness_percent(self) -> int:
+        try:
+            return max(10, min(250, int(self._settings.get("volume_preview_brightness_percent", 100))))
+        except (TypeError, ValueError):
+            return 100
+
+    def set_volume_preview_brightness_percent(self, percent: int) -> None:
+        self._settings["volume_preview_brightness_percent"] = max(10, min(250, int(percent)))
+        self._save_settings()
+
+    def get_volume_preview_export_snapshot_dir(self) -> str:
+        return str(self._settings.get("volume_preview_export_snapshot_dir", "") or "")
+
+    def set_volume_preview_export_snapshot_dir(self, directory: str) -> None:
+        self._settings["volume_preview_export_snapshot_dir"] = (directory or "").strip()
+        self._save_settings()
+
+    def get_volume_preview_export_mesh_dir(self) -> str:
+        return str(self._settings.get("volume_preview_export_mesh_dir", "") or "")
+
+    def set_volume_preview_export_mesh_dir(self, directory: str) -> None:
+        self._settings["volume_preview_export_mesh_dir"] = (directory or "").strip()
         self._save_settings()
 
     def get_voxel_spacing(self) -> list:

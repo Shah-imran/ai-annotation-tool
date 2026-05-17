@@ -29,6 +29,9 @@ from ..services.volume_preview_vtk_worker import (
     start_vtk_prepare_thread,
 )
 from ..services.volume_vtk_prepare import PreviewVTKPayload
+from ..utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class VolumePreview3D(QWidget):
@@ -56,6 +59,8 @@ class VolumePreview3D(QWidget):
         self._volume_actor = None
         self._surface_actor = None
         self._axes_actor = None
+        # Meshes kept for export (STL/OBJ/VTK/PLY) after the preview is built.
+        self._export_meshes: List[Any] = []
 
         self._kickoff_timer = QTimer(self)
         self._kickoff_timer.setSingleShot(True)
@@ -148,12 +153,19 @@ class VolumePreview3D(QWidget):
             self._busy_overlay.setGeometry(self.rect())
 
     def _set_busy_text(self, title: str, detail: str = "") -> None:
+        """Update the in-window busy overlay only (child process)."""
         self._busy_subtext = detail or "Working…"
         if self._busy_title is not None:
             self._busy_title.setText(title)
         if self._busy_detail is not None:
             c = self._spinner_chars[self._spinner_frame % len(self._spinner_chars)]
             self._busy_detail.setText(f"{c}  {self._busy_subtext}")
+
+    def _emit_progress(self, title: str, detail: str = "") -> None:
+        """Sync child overlay + main-panel status (title + detail, same as 3D window)."""
+        detail = detail or "Working…"
+        self._set_busy_text(title, detail)
+        self.render_stage.emit(f"{title}\n{detail}")
 
     def _tick_spinner(self) -> None:
         self._spinner_frame += 1
@@ -197,6 +209,7 @@ class VolumePreview3D(QWidget):
         self._volume_actor = None
         self._surface_actor = None
         self._axes_actor = None
+        self._export_meshes = []
         # Lighting may have been reset to the default headlight; re-snapshot
         # and re-apply the user's brightness so the next preview honours it.
         self._capture_base_light_intensities()
@@ -237,8 +250,9 @@ class VolumePreview3D(QWidget):
         self._pending_render = (result, current_z, generation)
         self._render_cancelled = False
         self._show_busy_overlay("Preparing 3D preview", "Starting…")
-        self.render_stage.emit(
-            "3D display: preparing…\n(Heavy work runs off the UI thread; GPU steps are scheduled.)"
+        self._emit_progress(
+            "Preparing 3D preview",
+            "Scheduling mesh build (CPU thread) and GPU draw steps…",
         )
         self._kickoff_timer.start(0)
 
@@ -261,9 +275,10 @@ class VolumePreview3D(QWidget):
             self.render_finished.emit(gen)
             return
 
-        self._set_busy_text("Building 3D meshes", "Running contours & filters (CPU thread)…")
-        self.render_stage.emit(
-            "3D display: building triangle meshes in background (CPU)…\nThis can take a while for large volumes."
+        self._emit_progress(
+            "Building 3D meshes",
+            "Contouring & triangulating on CPU thread…\n"
+            "Large volumes can take several minutes.",
         )
 
         worker = VolumePreviewVTKWorker()
@@ -273,7 +288,7 @@ class VolumePreview3D(QWidget):
             gen,
             is_cancelled=lambda: self._render_cancelled,
         )
-        worker.stage.connect(self.render_stage, Qt.QueuedConnection)
+        worker.stage.connect(self._on_vtk_worker_stage, Qt.QueuedConnection)
         worker.prepare_done.connect(self._on_prepare_done, Qt.QueuedConnection)
         worker.failed.connect(self._on_prepare_failed, Qt.QueuedConnection)
 
@@ -285,6 +300,9 @@ class VolumePreview3D(QWidget):
     def _on_prepare_thread_exited(self) -> None:
         self._prepare_thread = None
         self._prepare_worker = None
+
+    def _on_vtk_worker_stage(self, text: str) -> None:
+        self._emit_progress("Building 3D meshes", text)
 
     def _on_prepare_failed(self, message: str) -> None:
         self._chunk_timer.stop()
@@ -324,9 +342,10 @@ class VolumePreview3D(QWidget):
         self._chunk_payload = payload
         self._apply_queue = self._build_apply_queue(payload)
         self._apply_i = 0
-        self._set_busy_text("Drawing 3D preview", "Pushing geometry to GPU (chunked)…")
-        self.render_stage.emit(
-            "3D display: attaching meshes / volume on GPU…\nThe window should stay responsive."
+        n = len(self._apply_queue)
+        self._emit_progress(
+            "Drawing 3D preview",
+            f"Pushing geometry to GPU — {n} steps…\nThe main window stays responsive.",
         )
         self._chunk_timer.start(0)
 
@@ -342,16 +361,16 @@ class VolumePreview3D(QWidget):
         op = self._apply_queue[self._apply_i]
         self._apply_i += 1
         step_done = self._apply_i
-        self.render_stage.emit(
-            f"3D display: GPU step {step_done} / {n}\n"
-            + ("Clearing…" if op[0] == "clear" else "")
-            + ("Connecting volume renderer…" if op[0] == "volume" else "")
-            + ("Adding surface / points…" if op[0] == "cmd" else "")
-            + ("Finishing scene…" if op[0] == "finale" else "")
-        )
-        self._set_busy_text(
+        step_action = {
+            "clear": "Clearing scene",
+            "volume": "Connecting volume renderer",
+            "cmd": "Adding surface / points",
+            "finale": "Finishing scene (camera & slice plane)",
+        }.get(op[0], "Working")
+        self._emit_progress(
             "Drawing 3D preview",
-            f"Step {step_done} of {n} — scene assembly",
+            f"Step {step_done} of {n} — {step_action}\n"
+            f"GPU attach: {step_action.lower()}…",
         )
 
         kind = op[0]
@@ -374,9 +393,9 @@ class VolumePreview3D(QWidget):
                 and pl.result.mode in ("solid", "mip")
                 and pl.volume_fallback
             ):
-                self.render_stage.emit(
-                    "3D display: GPU volume renderer unavailable — "
-                    "falling back to layered surfaces."
+                self._emit_progress(
+                    "Drawing 3D preview",
+                    "GPU volume renderer unavailable — falling back to layered surfaces.",
                 )
                 for j, fb in enumerate(pl.volume_fallback):
                     fk, fd, fkw = fb
@@ -420,9 +439,9 @@ class VolumePreview3D(QWidget):
         if last_err is not None:
             msg = f"Volume render failed (mapper={last_mapper}, {last_err.__class__.__name__}: {last_err})"
             print(msg)
-            self.render_stage.emit(
-                "3D display: GPU volume renderer error\n"
-                f"{last_err.__class__.__name__}: {last_err}"
+            self._emit_progress(
+                "Drawing 3D preview",
+                f"GPU volume renderer error: {last_err.__class__.__name__}: {last_err}",
             )
         return False
 
@@ -436,6 +455,10 @@ class VolumePreview3D(QWidget):
             actor = self._plotter.add_mesh(data, **mkw)
             if self._surface_actor is None:
                 self._surface_actor = actor
+            try:
+                self._export_meshes.append(data.copy(deep=True))
+            except Exception:
+                self._export_meshes.append(data)
             if detail_lit:
                 self._enable_detail_lighting()
             return True
@@ -542,6 +565,7 @@ class VolumePreview3D(QWidget):
         self._volume_actor = None
         self._surface_actor = None
         self._axes_actor = None
+        self._export_meshes = []
 
         for kind, data, kw in payload.primary:
             if kind == "volume":
@@ -671,6 +695,89 @@ class VolumePreview3D(QWidget):
             self._plotter.render()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Export snapshot / 3D model
+    # ------------------------------------------------------------------
+    def has_exportable_geometry(self) -> bool:
+        return bool(self._export_meshes)
+
+    def capture_screenshot_array(self, scale: int = 3) -> Optional[np.ndarray]:
+        """Capture the current view to a numpy image (must run on the GUI thread)."""
+        if not self.is_available:
+            return None
+        try:
+            scale = max(1, min(int(scale), 8))
+            self._plotter.render()
+            w, h = self._plotter.window_size
+            try:
+                img = self._plotter.screenshot(
+                    window_size=(w * scale, h * scale),
+                    return_img=True,
+                )
+            except TypeError:
+                img = self._plotter.screenshot(scale=scale, return_img=True)
+            if img is None:
+                return None
+            return np.asarray(img)
+        except Exception as exc:
+            logger.exception("Screenshot capture failed: %s", exc)
+            return None
+
+    def copy_export_meshes(self) -> List[Any]:
+        """Deep-copy export meshes for use on a worker thread."""
+        copies: List[Any] = []
+        for mesh in self._export_meshes:
+            try:
+                copies.append(mesh.copy(deep=True))
+            except Exception:
+                copies.append(mesh)
+        return copies
+
+    def save_screenshot(self, path: str, scale: int = 3) -> bool:
+        """Synchronous screenshot save (capture + write on calling thread)."""
+        arr = self.capture_screenshot_array(scale)
+        if arr is None:
+            return False
+        try:
+            from PIL import Image
+
+            data = arr
+            if data.dtype != np.uint8:
+                if data.max() <= 1.0:
+                    data = (np.clip(data, 0.0, 1.0) * 255.0).astype(np.uint8)
+                else:
+                    data = np.clip(data, 0, 255).astype(np.uint8)
+            if data.ndim == 3 and data.shape[2] >= 3:
+                Image.fromarray(data[:, :, :3], mode="RGB").save(path)
+            else:
+                Image.fromarray(data).save(path)
+            logger.info("Saved 3D screenshot %s", path)
+            return True
+        except Exception as exc:
+            logger.exception("Screenshot save failed: %s", exc)
+            return False
+
+    def export_combined_mesh(self, path: str) -> bool:
+        """Synchronous mesh export (merge + write on calling thread)."""
+        if not HAS_PYVISTA or not self._export_meshes:
+            return False
+        meshes = self.copy_export_meshes()
+        try:
+            combined = meshes[0]
+            for mesh in meshes[1:]:
+                combined = combined.merge(mesh)
+            combined.save(path)
+            logger.info(
+                "Exported 3D mesh %s (%d parts, %d points)",
+                path,
+                len(meshes),
+                combined.n_points,
+            )
+            return True
+        except Exception as exc:
+            logger.exception("Mesh export failed: %s", exc)
+            return False
 
     def _add_bounds_axes(self) -> None:
         self._axes_actor = self._plotter.add_axes(

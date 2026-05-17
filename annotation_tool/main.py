@@ -4,9 +4,13 @@ Main entry point for the Annotation Tool (Scan Lab).
 import sys
 import os
 import argparse
+import logging
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 from .controllers import MainController
+from .utils.logging_config import get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 
 def setup_application():
@@ -77,7 +81,9 @@ def main():
     """Main application entry point."""
     # Parse command line arguments
     args = parse_arguments()
-    
+
+    setup_logging(level=logging.INFO, log_to_file=True)
+
     # Setup application
     app = setup_application()
     
@@ -95,22 +101,22 @@ def main():
         if os.path.isfile(args.classes):
             controller._annotation_controller.load_class_names(args.classes)
         else:
-            print(f"Warning: Class file not found: {args.classes}")
+            logger.warning("Class file not found: %s", args.classes)
     
     if args.images:
         if os.path.isdir(args.images):
             controller._image_model.load_images_from_directory(args.images)
         else:
-            print(f"Warning: Image directory not found: {args.images}")
+            logger.warning("Image directory not found: %s", args.images)
     elif args.list:
         if os.path.isfile(args.list):
             controller._image_model.load_images_from_file_list(args.list, args.base_dir)
         else:
-            print(f"Warning: Image list file not found: {args.list}")
+            logger.warning("Image list file not found: %s", args.list)
     
     # Show message about session restoration
     if not override_session and controller._settings_model.has_previous_session():
-        print("Restored last session. Use File menu to load different data if needed.")
+        logger.info("Restored last session. Use File menu to load different data if needed.")
     
     # Show main window
     controller.show()

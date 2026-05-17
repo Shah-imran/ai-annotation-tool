@@ -15,6 +15,9 @@ from PyQt5.QtCore import QObject, QProcess, QProcessEnvironment, Qt, QTimer, pyq
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 
 from . import preview_ipc as ipc
+from ..utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class PreviewProcessClient(QObject):
@@ -26,6 +29,7 @@ class PreviewProcessClient(QObject):
     finished = pyqtSignal(int, str)  # generation, status text
     failed = pyqtSignal(int, str)  # generation, error text
     window_closed = pyqtSignal()
+    preview_ui_changed = pyqtSignal(dict)
     disconnected = pyqtSignal()
     spawn_failed = pyqtSignal(str)
 
@@ -75,6 +79,7 @@ class PreviewProcessClient(QObject):
             pass
         if not self._server.listen(self._socket_name):
             err = self._server.errorString()
+            logger.error("Could not start IPC server: %s", err)
             self.spawn_failed.emit(f"Could not start IPC server: {err}")
             return False
         return True
@@ -172,6 +177,20 @@ class PreviewProcessClient(QObject):
     def hide_child_window(self) -> bool:
         return self._send({"type": ipc.MSG_HIDE_WINDOW})
 
+    def send_set_preview_ui(
+        self,
+        *,
+        brightness_percent: int = 100,
+        snapshot_dir: str = "",
+        mesh_dir: str = "",
+    ) -> bool:
+        return self._send({
+            "type": ipc.MSG_SET_PREVIEW_UI,
+            "brightness_percent": int(brightness_percent),
+            "snapshot_dir": snapshot_dir or "",
+            "mesh_dir": mesh_dir or "",
+        })
+
     # ----- internals -------------------------------------------------------
 
     def _send(self, message: dict) -> bool:
@@ -237,6 +256,14 @@ class PreviewProcessClient(QObject):
             self.failed.emit(int(msg.get("generation", 0)), str(msg.get("text", "")))
         elif mtype == ipc.MSG_WINDOW_CLOSED:
             self.window_closed.emit()
+        elif mtype == ipc.MSG_PREVIEW_UI_CHANGED:
+            payload = {
+                k: msg.get(k)
+                for k in ("brightness_percent", "snapshot_dir", "mesh_dir")
+                if k in msg
+            }
+            if payload:
+                self.preview_ui_changed.emit(payload)
         elif mtype == ipc.MSG_BYE:
             pass
 
@@ -262,6 +289,7 @@ class PreviewProcessClient(QObject):
             # Drop any messages that were queued for a child that will never
             # exist — the caller will retry via ensure_started() if it cares.
             self._pending_messages.clear()
+        logger.error("Child process error (%s): %s", err, msg)
         self.spawn_failed.emit(f"Child process error: {msg}")
 
     def _on_process_finished(self, exit_code: int, exit_status) -> None:

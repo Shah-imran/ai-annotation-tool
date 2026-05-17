@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 from .child_window import ChildPreviewWindow
@@ -36,10 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     endpoint = ChildIpcEndpoint(window=window, socket_name=args.socket)
     endpoint.connect_to_parent()
 
-    window.show()
-    window.activateWindow()
-    window.raise_()
-    window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+    # Stay hidden until the parent sends show_window after the preview build
+    # finishes. Prewarm only loads VTK/PyVista in the background.
+    window.hide()
 
     return app.exec_()
 

@@ -44,6 +44,7 @@ class RemoteVolumePreview3D(QWidget):
     spawn_failed = pyqtSignal(str)
     child_window_visible_changed = pyqtSignal(bool)
     busy_changed = pyqtSignal(bool)
+    preview_ui_changed = pyqtSignal(dict)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -57,6 +58,7 @@ class RemoteVolumePreview3D(QWidget):
         # Last generation we were told to track; used to clear panel busy
         # state even if the child disconnects without emitting FINISHED.
         self._last_generation = 0
+        self._preview_ui_config: dict = {}
 
         self._wire_client()
 
@@ -108,7 +110,8 @@ class RemoteVolumePreview3D(QWidget):
         ok = self._client.send_start_preview(int(generation), params)
         if not ok:
             self._emit_stage("Queued preview — waiting for child process to come up…")
-        self._show_window_if_hidden()
+        # Keep the 3D window hidden until the child reports FINISHED.
+        self.hide_child_window()
         return True
 
     def show_child_window(self) -> None:
@@ -130,6 +133,25 @@ class RemoteVolumePreview3D(QWidget):
 
     def shutdown(self) -> None:
         self._client.shutdown()
+
+    def configure_preview_ui(
+        self,
+        *,
+        brightness_percent: int = 100,
+        snapshot_dir: str = "",
+        mesh_dir: str = "",
+    ) -> None:
+        self._preview_ui_config = {
+            "brightness_percent": int(brightness_percent),
+            "snapshot_dir": snapshot_dir or "",
+            "mesh_dir": mesh_dir or "",
+        }
+        if self._client.is_ready:
+            self._client.send_set_preview_ui(**self._preview_ui_config)
+
+    def _apply_pending_preview_ui(self) -> None:
+        if self._preview_ui_config and self._client.is_ready:
+            self._client.send_set_preview_ui(**self._preview_ui_config)
 
     def prewarm(self) -> None:
         """Spawn the child process in the background.
@@ -153,6 +175,7 @@ class RemoteVolumePreview3D(QWidget):
         self._client.window_closed.connect(self._on_child_window_closed)
         self._client.disconnected.connect(self._on_child_disconnected)
         self._client.spawn_failed.connect(self._on_spawn_failed)
+        self._client.preview_ui_changed.connect(self.preview_ui_changed.emit)
 
     def _emit_stage(self, text: str) -> None:
         self.render_stage.emit(text)
@@ -162,12 +185,6 @@ class RemoteVolumePreview3D(QWidget):
             return
         self._busy = busy
         self.busy_changed.emit(busy)
-
-    def _show_window_if_hidden(self) -> None:
-        if self._client.is_alive and not self._child_visible:
-            self._client.show_child_window()
-            self._child_visible = True
-            self.child_window_visible_changed.emit(True)
 
     def _clear_busy_for_active_generation(self) -> None:
         """Clear busy state by emitting render_finished for whatever
@@ -183,6 +200,7 @@ class RemoteVolumePreview3D(QWidget):
 
     def _on_child_ready(self) -> None:
         self._emit_stage("3D preview process ready.")
+        self._apply_pending_preview_ui()
 
     def _on_stage(self, text: str, gen: int) -> None:
         del gen
@@ -202,6 +220,8 @@ class RemoteVolumePreview3D(QWidget):
         # FINISHED still releases the UI.
         self._set_busy(False)
         self.render_finished.emit(gen_int)
+        # Reveal the 3D window only once the full preview is ready.
+        self.show_child_window()
 
     def _on_failed(self, gen: int, text: str) -> None:
         self._emit_stage(f"3D preview failed: {text}")

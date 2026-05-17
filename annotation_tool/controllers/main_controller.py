@@ -331,6 +331,9 @@ class MainController(QObject):
         self._main_window.volume_workspace.control_panel.preview_settings_changed.connect(
             self._on_volume_preview_settings_changed
         )
+        self._main_window.volume_workspace.preview_3d.preview_ui_changed.connect(
+            self._on_child_preview_ui_changed
+        )
         self._main_window.qa_mode_toggled.connect(self._on_qa_mode_toggled)
         self._main_window.preferences_requested.connect(self._on_preferences_requested)
         self._main_window.window_closing.connect(self.save_window_state)
@@ -1044,6 +1047,9 @@ class MainController(QObject):
             self._preferences_dialog.volume_brush_radius_changed.connect(
                 self._on_volume_brush_radius_preference_changed
             )
+            self._preferences_dialog.volume_preview_defaults_changed.connect(
+                self._on_volume_preview_defaults_from_preferences
+            )
         
         # Set current values
         self._preferences_dialog.set_image_directory(self._settings_model.get_last_image_directory())
@@ -1074,6 +1080,9 @@ class MainController(QObject):
         )
         self._preferences_dialog.set_volume_brush_radius(
             self._settings_model.get_volume_brush_radius()
+        )
+        self._preferences_dialog.set_volume_preview_defaults(
+            self._volume_preview_prefs_from_settings()
         )
         
         # Set control panel value
@@ -1507,11 +1516,8 @@ class MainController(QObject):
     def _on_volume_brush_radius_changed(self, radius: int):
         self._settings_model.set_volume_brush_radius(radius)
 
-    def _on_volume_class_changed(self, combo_index: int):
-        combo = self._main_window.volume_workspace.control_panel.class_combo
-        class_id = combo.itemData(combo_index)
-        if class_id is not None:
-            self._settings_model.set_volume_class_id(int(class_id))
+    def _on_volume_class_changed(self, class_id: int):
+        self._settings_model.set_volume_class_id(int(class_id))
 
     def _restore_volume_session_on_startup(self):
         """Restore 2D/3D tab and last volume scan paths."""
@@ -1547,6 +1553,129 @@ class MainController(QObject):
             self._settings_model.get_volume_splitter_horizontal(),
         )
 
+    def _volume_preview_prefs_from_settings(self) -> dict:
+        return {
+            "mode": self._settings_model.get_volume_preview_mode(),
+            "level": self._settings_model.get_volume_preview_level(),
+            "stride_z": self._settings_model.get_volume_preview_stride_z(),
+            "stride_xy": self._settings_model.get_volume_preview_stride_xy(),
+            "native_resolution": self._settings_model.get_volume_preview_native_resolution(),
+            "limit_z_range": self._settings_model.get_volume_preview_limit_z_range(),
+            "z_start": self._settings_model.get_volume_preview_z_start(),
+            "z_end": self._settings_model.get_volume_preview_z_end(),
+            "show_mask": self._settings_model.get_volume_preview_show_mask(),
+            "iso_color": self._settings_model.get_volume_preview_iso_color(),
+            "point_size": self._settings_model.get_volume_preview_point_size(),
+            "point_threshold_auto": self._settings_model.get_volume_preview_point_threshold_auto(),
+            "point_threshold": self._settings_model.get_volume_preview_point_threshold(),
+            "brightness_percent": self._settings_model.get_volume_preview_brightness_percent(),
+            "snapshot_dir": self._settings_model.get_volume_preview_export_snapshot_dir(),
+            "mesh_dir": self._settings_model.get_volume_preview_export_mesh_dir(),
+        }
+
+    def _save_volume_preview_prefs_to_settings(self, prefs: dict) -> None:
+        if "mode" in prefs:
+            self._settings_model.set_volume_preview_mode(prefs["mode"])
+        if "level" in prefs:
+            self._settings_model.set_volume_preview_level(prefs["level"])
+        if "stride_z" in prefs:
+            self._settings_model.set_volume_preview_stride_z(prefs["stride_z"])
+        if "stride_xy" in prefs:
+            self._settings_model.set_volume_preview_stride_xy(prefs["stride_xy"])
+        if "native_resolution" in prefs:
+            self._settings_model.set_volume_preview_native_resolution(prefs["native_resolution"])
+        if "limit_z_range" in prefs:
+            self._settings_model.set_volume_preview_limit_z_range(prefs["limit_z_range"])
+        if "z_start" in prefs:
+            self._settings_model.set_volume_preview_z_start(prefs["z_start"])
+        if "z_end" in prefs:
+            self._settings_model.set_volume_preview_z_end(prefs["z_end"])
+        if "show_mask" in prefs:
+            self._settings_model.set_volume_preview_show_mask(prefs["show_mask"])
+        if "iso_color" in prefs:
+            self._settings_model.set_volume_preview_iso_color(prefs["iso_color"])
+        if "point_size" in prefs:
+            self._settings_model.set_volume_preview_point_size(prefs["point_size"])
+        if "point_threshold_auto" in prefs:
+            self._settings_model.set_volume_preview_point_threshold_auto(
+                prefs["point_threshold_auto"]
+            )
+        if "point_threshold" in prefs:
+            self._settings_model.set_volume_preview_point_threshold(prefs["point_threshold"])
+        if "brightness_percent" in prefs:
+            self._settings_model.set_volume_preview_brightness_percent(
+                prefs["brightness_percent"]
+            )
+        if "snapshot_dir" in prefs:
+            self._settings_model.set_volume_preview_export_snapshot_dir(prefs["snapshot_dir"])
+        if "mesh_dir" in prefs:
+            self._settings_model.set_volume_preview_export_mesh_dir(prefs["mesh_dir"])
+
+    def _push_preview_ui_to_child(self) -> None:
+        preview = self._main_window.volume_workspace.preview_3d
+        preview.configure_preview_ui(
+            brightness_percent=self._settings_model.get_volume_preview_brightness_percent(),
+            snapshot_dir=self._settings_model.get_volume_preview_export_snapshot_dir(),
+            mesh_dir=self._settings_model.get_volume_preview_export_mesh_dir(),
+        )
+
+    def _apply_volume_preview_prefs_to_panel(self, prefs: dict) -> None:
+        panel = self._main_window.volume_workspace.control_panel
+        if "level" in prefs:
+            panel.set_preview_level(prefs["level"])
+        if "stride_z" in prefs:
+            panel.set_preview_stride_z(prefs["stride_z"])
+        if "stride_xy" in prefs:
+            panel.set_preview_stride_xy(prefs["stride_xy"])
+        if "native_resolution" in prefs:
+            panel.set_preview_native_resolution(prefs["native_resolution"])
+        if "mode" in prefs:
+            panel.set_preview_mode(prefs["mode"])
+        if "point_size" in prefs:
+            panel.set_preview_point_size(prefs["point_size"])
+        if "point_threshold_auto" in prefs:
+            panel.set_preview_point_threshold_auto(prefs["point_threshold_auto"])
+        if "point_threshold" in prefs:
+            panel.set_preview_point_threshold(prefs["point_threshold"])
+        if "iso_color" in prefs:
+            panel.set_preview_iso_color(prefs["iso_color"])
+        if "show_mask" in prefs:
+            panel.set_preview_show_mask(prefs["show_mask"])
+        n = self._volume_model.num_slices
+        if n > 0 and ("z_start" in prefs or "z_end" in prefs or "limit_z_range" in prefs):
+            z0 = prefs.get("z_start", self._settings_model.get_volume_preview_z_start())
+            z1 = prefs.get("z_end", self._settings_model.get_volume_preview_z_end())
+            if z1 < 0 or z1 >= n:
+                z1 = n - 1
+            z0 = min(max(0, z0), n - 1)
+            panel.set_preview_z_range_1based(
+                z0,
+                z1,
+                prefs.get(
+                    "limit_z_range",
+                    self._settings_model.get_volume_preview_limit_z_range(),
+                ),
+            )
+
+    def _on_volume_preview_defaults_from_preferences(self, prefs: dict) -> None:
+        self._save_volume_preview_prefs_to_settings(prefs)
+        self._apply_volume_preview_prefs_to_panel(prefs)
+        self._push_preview_ui_to_child()
+
+    def _on_child_preview_ui_changed(self, payload: dict) -> None:
+        if "brightness_percent" in payload:
+            self._settings_model.set_volume_preview_brightness_percent(
+                int(payload["brightness_percent"])
+            )
+        if "snapshot_dir" in payload:
+            self._settings_model.set_volume_preview_export_snapshot_dir(
+                str(payload["snapshot_dir"] or "")
+            )
+        if "mesh_dir" in payload:
+            self._settings_model.set_volume_preview_export_mesh_dir(
+                str(payload["mesh_dir"] or "")
+            )
+
     def _on_volume_preview_settings_changed(self) -> None:
         panel = self._main_window.volume_workspace.control_panel
         self._settings_model.set_volume_preview_level(panel.get_preview_level())
@@ -1575,6 +1704,7 @@ class MainController(QObject):
         self._settings_model.set_volume_preview_iso_color(
             panel.get_preview_iso_color()
         )
+        self._settings_model.set_volume_preview_show_mask(panel.is_preview_show_mask())
 
     def _apply_volume_ui_preferences(self):
         """Apply saved brush/class/slice preferences to the volume UI."""
@@ -1618,6 +1748,10 @@ class MainController(QObject):
         panel.set_preview_iso_color(
             self._settings_model.get_volume_preview_iso_color()
         )
+        panel.set_preview_show_mask(
+            self._settings_model.get_volume_preview_show_mask()
+        )
+        self._push_preview_ui_to_child()
         n = self._volume_model.num_slices
         if n > 0:
             panel.set_scan_slice_count(n)
@@ -1681,5 +1815,15 @@ class MainController(QObject):
         self._settings_model.set_volume_preview_native_resolution(
             panel.is_preview_native_resolution()
         )
+        self._settings_model.set_volume_preview_mode(panel.get_preview_mode())
+        self._settings_model.set_volume_preview_point_size(panel.get_preview_point_size())
+        self._settings_model.set_volume_preview_point_threshold_auto(
+            panel.is_preview_point_threshold_auto()
+        )
+        self._settings_model.set_volume_preview_point_threshold(
+            panel.get_preview_point_threshold()
+        )
+        self._settings_model.set_volume_preview_iso_color(panel.get_preview_iso_color())
+        self._settings_model.set_volume_preview_show_mask(panel.is_preview_show_mask())
 
 
