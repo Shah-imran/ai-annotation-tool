@@ -161,7 +161,7 @@ def _build_isosurface_commands(
             opacity = 0.18 + 0.62 * (i + 1) / n_levels
         if opaque_single:
             mesh_kw = {
-                "color": "#dcdcdc",
+                "color": getattr(result, "iso_color", None) or "#dcdcdc",
                 "opacity": 1.0,
                 "smooth_shading": True,
                 "ambient": 0.18,
@@ -283,7 +283,7 @@ def build_preview_payload(
                     {
                         "scalars": "intensity",
                         "cmap": "gray",
-                        "point_size": 3.0,
+                        "point_size": float(getattr(result, "point_size", 3.0) or 3.0),
                         "render_points_as_spheres": True,
                         "opacity": 0.9,
                         "show_scalar_bar": False,

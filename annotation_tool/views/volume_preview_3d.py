@@ -84,9 +84,18 @@ class VolumePreview3D(QWidget):
         self._spinner_chars = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
         self._busy_subtext = ""
 
+        # Brightness control: scale all renderer lights by this factor (1.0 = default).
+        # `_base_light_intensities` is captured once per lighting setup so dragging the
+        # slider doesn't compound previous multiplications.
+        self._brightness_factor: float = 1.0
+        self._base_light_intensities: List[float] = []
+
         if HAS_PYVISTA:
             self._plotter = QtInteractor(self, auto_update=False)
-            self._plotter.set_background("#1e1e1e")
+            # Soft "studio cyclorama" gray gradient. Pairs well with the warm
+            # rim / cool fill lights used by isosurface_lit and still gives
+            # point clouds enough contrast against the background.
+            self._set_studio_background()
             self._plotter.enable_trackball_style()
             self._plotter.disable_parallel_projection()
             try:
@@ -99,6 +108,9 @@ class VolumePreview3D(QWidget):
             interactor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._layout.addWidget(interactor, stretch=1)
             self._setup_busy_overlay()
+            # Snapshot the default VTK headlight intensities so the brightness
+            # slider has something to scale even when no preview is loaded yet.
+            self._capture_base_light_intensities()
         else:
             self._placeholder = QLabel(
                 "3D preview requires PyVista.\n\n"
@@ -185,6 +197,10 @@ class VolumePreview3D(QWidget):
         self._volume_actor = None
         self._surface_actor = None
         self._axes_actor = None
+        # Lighting may have been reset to the default headlight; re-snapshot
+        # and re-apply the user's brightness so the next preview honours it.
+        self._capture_base_light_intensities()
+        self._apply_brightness_factor()
         self._plotter.render()
 
     def cancel_render(self) -> None:
@@ -439,6 +455,23 @@ class VolumePreview3D(QWidget):
         except Exception:
             pass
 
+    def _set_studio_background(self) -> None:
+        """Fixed neutral-gray gradient. Falls back to a flat color on older PyVista."""
+        if not self.is_available:
+            return
+        bottom = "#363636"
+        top = "#5a5a5a"
+        try:
+            self._plotter.set_background(bottom, top=top)
+        except TypeError:
+            # Older PyVista versions don't accept `top` — flat fill is fine.
+            try:
+                self._plotter.set_background(bottom)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _enable_detail_lighting(self) -> None:
         """SSAO + ambient occlusion + multi-light setup to reveal voids / small features."""
         if not self.is_available:
@@ -475,6 +508,10 @@ class VolumePreview3D(QWidget):
                 self._plotter.add_light(key)
                 self._plotter.add_light(fill)
                 self._plotter.add_light(rim)
+            # Re-snapshot base intensities for the brightness slider and
+            # re-apply the user's current factor so the new lights inherit it.
+            self._capture_base_light_intensities()
+            self._apply_brightness_factor()
         except Exception as exc:
             print(f"Detail-lighting setup skipped: {exc}")
         try:
@@ -572,6 +609,68 @@ class VolumePreview3D(QWidget):
             return
         self._reset_camera_to_data()
         self._plotter.render()
+
+    # ------------------------------------------------------------------
+    # Brightness control
+    # ------------------------------------------------------------------
+    @property
+    def brightness_factor(self) -> float:
+        return self._brightness_factor
+
+    def set_brightness(self, factor: float) -> None:
+        """Scale every renderer light by `factor` (1.0 = unchanged, 0 = dark, 2.0 = double).
+
+        We always rescale relative to the snapshot taken when the lighting
+        setup was installed, so repeated calls don't compound.
+        """
+        try:
+            value = float(factor)
+        except (TypeError, ValueError):
+            return
+        # Clamp to a sensible range; VTK accepts very large values but the
+        # picture clips long before we get there.
+        value = max(0.0, min(value, 4.0))
+        self._brightness_factor = value
+        self._apply_brightness_factor()
+
+    def _capture_base_light_intensities(self) -> None:
+        """Record the current intensity of every light so the slider has a baseline."""
+        if not self.is_available:
+            self._base_light_intensities = []
+            return
+        try:
+            lights = self._plotter.renderer.GetLights()
+            n = lights.GetNumberOfItems()
+            lights.InitTraversal()
+            intensities: List[float] = []
+            for _ in range(n):
+                light = lights.GetNextItem()
+                if light is None:
+                    continue
+                intensities.append(float(light.GetIntensity()))
+            self._base_light_intensities = intensities
+        except Exception:
+            self._base_light_intensities = []
+
+    def _apply_brightness_factor(self) -> None:
+        if not self.is_available or not self._base_light_intensities:
+            return
+        try:
+            lights = self._plotter.renderer.GetLights()
+            n = lights.GetNumberOfItems()
+            lights.InitTraversal()
+            i = 0
+            for _ in range(n):
+                light = lights.GetNextItem()
+                if light is None:
+                    continue
+                if i < len(self._base_light_intensities):
+                    base = self._base_light_intensities[i]
+                    light.SetIntensity(max(0.0, base * self._brightness_factor))
+                i += 1
+            self._plotter.render()
+        except Exception:
+            pass
 
     def _add_bounds_axes(self) -> None:
         self._axes_actor = self._plotter.add_axes(

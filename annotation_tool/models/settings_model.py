@@ -230,6 +230,12 @@ class SettingsModel(QObject):
             "volume_preview_native_resolution": False,
             "volume_preview_stride_z": 1,
             "volume_preview_stride_xy": 1,
+            # 3D preview — currently selected mode + point-cloud parameters.
+            "volume_preview_mode": "isosurface_lit",
+            "volume_preview_point_size": 3.0,              # 1.0–20.0
+            "volume_preview_point_threshold_auto": True,
+            "volume_preview_point_threshold": 25,          # 0–255
+            "volume_preview_iso_color": "#dcdcdc",         # `#RRGGBB`, isosurface mesh color
         }
     
     # Image directory settings
@@ -527,6 +533,69 @@ class SettingsModel(QObject):
 
     def set_volume_preview_native_resolution(self, enabled: bool) -> None:
         self._settings["volume_preview_native_resolution"] = bool(enabled)
+        self._save_settings()
+
+    # --- Mode + per-mode parameters ---------------------------------------
+
+    _VALID_PREVIEW_MODES = ("isosurface_lit", "point_cloud")
+
+    def get_volume_preview_mode(self) -> str:
+        mode = str(self._settings.get("volume_preview_mode", "isosurface_lit"))
+        if mode not in self._VALID_PREVIEW_MODES:
+            mode = "isosurface_lit"
+        return mode
+
+    def set_volume_preview_mode(self, mode: str) -> None:
+        if mode in self._VALID_PREVIEW_MODES:
+            self._settings["volume_preview_mode"] = mode
+            self._save_settings()
+
+    def get_volume_preview_point_size(self) -> float:
+        try:
+            return max(1.0, min(20.0, float(self._settings.get("volume_preview_point_size", 3.0))))
+        except (TypeError, ValueError):
+            return 3.0
+
+    def set_volume_preview_point_size(self, value: float) -> None:
+        self._settings["volume_preview_point_size"] = max(1.0, min(20.0, float(value)))
+        self._save_settings()
+
+    def get_volume_preview_point_threshold_auto(self) -> bool:
+        return bool(self._settings.get("volume_preview_point_threshold_auto", True))
+
+    def set_volume_preview_point_threshold_auto(self, enabled: bool) -> None:
+        self._settings["volume_preview_point_threshold_auto"] = bool(enabled)
+        self._save_settings()
+
+    def get_volume_preview_point_threshold(self) -> int:
+        try:
+            return max(0, min(255, int(self._settings.get("volume_preview_point_threshold", 25))))
+        except (TypeError, ValueError):
+            return 25
+
+    def set_volume_preview_point_threshold(self, value: int) -> None:
+        self._settings["volume_preview_point_threshold"] = max(0, min(255, int(value)))
+
+    def get_volume_preview_iso_color(self) -> str:
+        value = str(self._settings.get("volume_preview_iso_color", "#dcdcdc"))
+        if not (value.startswith("#") and len(value) == 7):
+            return "#dcdcdc"
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            return "#dcdcdc"
+        return value
+
+    def set_volume_preview_iso_color(self, value: str) -> None:
+        text = (value or "").strip()
+        if not (text.startswith("#") and len(text) == 7):
+            text = "#dcdcdc"
+        else:
+            try:
+                int(text[1:], 16)
+            except ValueError:
+                text = "#dcdcdc"
+        self._settings["volume_preview_iso_color"] = text
         self._save_settings()
 
     def get_voxel_spacing(self) -> list:

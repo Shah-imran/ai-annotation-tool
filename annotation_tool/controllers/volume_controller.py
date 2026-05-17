@@ -5,7 +5,7 @@ import os
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PyQt5.QtCore import QObject, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import QFileDialog
 
 from ..models.label_volume_model import LabelVolumeModel
@@ -15,7 +15,7 @@ from ..services.volume_io import (
     save_segmentation_nifti,
     save_volume_meta,
 )
-from ..services.volume_preview_worker import VolumePreviewWorker, start_preview_build_thread
+from ..services.preview_ipc import make_preview_inputs
 from ..views.volume_workspace import VolumeWorkspace
 
 
@@ -50,12 +50,8 @@ class VolumeController(QObject):
         self._canvas = workspace.slice_canvas
         self._panel = workspace.control_panel
         self._preview = workspace.preview_3d
-        self._preview_thread: Optional[QThread] = None
-        self._preview_worker: Optional[VolumePreviewWorker] = None
-        self._pending_preview_result = None
         self._preview_generation = 0
         self._vtk_render_generation = 0
-        self._last_status_result = None
 
         self._connect_signals()
         self._refresh_class_list()
@@ -86,8 +82,16 @@ class VolumeController(QObject):
         self._panel.preview_rebuild_requested.connect(self._start_preview_build)
         self._panel.preview_stop_requested.connect(self._stop_preview_requested)
         self._panel.preview_reset_view_requested.connect(self._preview.reset_orientation)
+        self._panel.preview_show_window_requested.connect(self._preview.show_child_window)
+        self._panel.preview_hide_window_requested.connect(self._preview.hide_child_window)
         self._preview.render_finished.connect(self._on_vtk_render_finished, Qt.QueuedConnection)
         self._preview.render_stage.connect(self._panel.set_preview_status, Qt.QueuedConnection)
+        self._preview.child_window_visible_changed.connect(
+            self._panel.set_preview_window_visible
+        )
+        self._preview.busy_changed.connect(self._on_preview_busy_changed)
+        # Initial sync — child isn't running yet, so buttons should reflect "hidden".
+        self._panel.set_preview_window_visible(False)
 
     def _refresh_class_list(self):
         names = self._get_class_names()
@@ -148,6 +152,10 @@ class VolumeController(QObject):
             self._panel.set_preview_status(
                 "Press Start preview when you are ready to build the 3D view."
             )
+            # Spawn the child preview process in the background now so the
+            # first Start click is instantaneous instead of paying the
+            # VTK / PyVista import cost on the foreground.
+            self.prewarm_preview()
         else:
             self._panel.set_preview_status(
                 "Install PyVista for 3D preview: pip install pyvista pyvistaqt"
@@ -257,12 +265,9 @@ class VolumeController(QObject):
         self._stroke_bounds = None
 
     def _stop_preview_requested(self) -> None:
-        """Cancel background slice load and/or abort queued VTK render."""
+        """Cancel the in-flight preview job in the child process."""
         self._preview_generation += 1
-        self._vtk_render_generation += 1
-        self._cancel_preview_build()
-        self._pending_preview_result = None
-        self._last_status_result = None
+        self._vtk_render_generation = self._preview_generation
         self._preview.cancel_render()
         self._panel.set_preview_busy(False)
         self._panel.set_preview_status("Preview stopped.")
@@ -294,8 +299,8 @@ class VolumeController(QObject):
         return sub_paths, indices, full_shape, (z0, z1)
 
     def _cancel_preview_build(self) -> None:
-        if self._preview_worker is not None:
-            self._preview_worker.request_cancel()
+        if self._preview is not None:
+            self._preview.cancel_render()
 
     def _start_preview_build(self) -> None:
         if self._volume_model.num_slices == 0 or not self._preview.is_available:
@@ -303,9 +308,7 @@ class VolumeController(QObject):
 
         self._cancel_preview_build()
         self._preview_generation += 1
-        self._vtk_render_generation += 1
-        self._last_status_result = None
-        self._preview.cancel_render()
+        self._vtk_render_generation = self._preview_generation
         build_generation = self._preview_generation
 
         spacing = self._get_voxel_spacing()
@@ -320,8 +323,8 @@ class VolumeController(QObject):
 
         self._panel.set_preview_busy(True)
         self._panel.set_preview_status(
-            "Loading slice stack for 3D…\n"
-            "When slices finish, meshes build on a background CPU thread, then the GPU draws in steps."
+            "Sending preview job to the 3D preview process…\n"
+            "Slice loading + mesh build + GPU draw all run in a separate process."
         )
 
         preview_paths, z_indices, full_shape, z_range = self._preview_build_inputs()
@@ -336,14 +339,20 @@ class VolumeController(QObject):
             sxy = self._panel.get_preview_stride_xy()
             stride_zyx = (sz, sxy, sxy)
 
-        worker = VolumePreviewWorker()
-        worker.configure(
-            preview_paths,
-            spacing_xyz,
-            self._panel.get_preview_mode(),
-            self._volume_model.window_center,
-            self._volume_model.window_width,
-            self._volume_model.use_window_level,
+        mode = self._panel.get_preview_mode()
+        point_threshold_override = (
+            None
+            if self._panel.is_preview_point_threshold_auto()
+            else int(self._panel.get_preview_point_threshold())
+        )
+
+        params = make_preview_inputs(
+            slice_paths=preview_paths,
+            spacing_xyz=spacing_xyz,
+            mode=mode,
+            window_center=self._volume_model.window_center,
+            window_width=self._volume_model.window_width,
+            use_window_level=self._volume_model.use_window_level,
             include_mask=include_mask,
             preview_level=self._panel.get_preview_level(),
             native_full_volume=self._panel.is_preview_native_resolution(),
@@ -352,103 +361,57 @@ class VolumeController(QObject):
             label_path=label_path,
             label_shape=label_shape,
             stride_zyx=stride_zyx,
+            current_z=self._volume_model.current_index,
+            point_size=self._panel.get_preview_point_size(),
+            point_threshold_override=point_threshold_override,
+            iso_color=self._panel.get_preview_iso_color(),
         )
-        worker.progress.connect(
-            self._panel.set_preview_status, Qt.QueuedConnection
-        )
-        worker.finished.connect(
-            lambda result, gen=build_generation: self._on_preview_data_ready(result, gen),
-            Qt.QueuedConnection,
-        )
-        worker.failed.connect(self._on_preview_failed, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
 
-        self._preview_worker = worker
-        self._preview_thread, _ = start_preview_build_thread(worker, parent=self)
-        self._preview_thread.finished.connect(self._on_preview_thread_finished)
-        self._preview_thread.finished.connect(self._preview_thread.deleteLater)
-
-    def _on_preview_data_ready(self, result, build_generation: int) -> None:
-        """Begin VTK draw (deferred + chunked) on the UI thread after worker data is ready."""
-        if build_generation != self._preview_generation:
-            return
-        self._last_status_result = result
-        self._panel.set_preview_status(
-            "Slice stack ready — preparing 3D display…\n"
-            "Next: mesh build (CPU thread) → GPU draw (chunked on main thread)."
-        )
-        gen = self._vtk_render_generation
-        z = self._volume_model.current_index
-        self._preview.begin_set_preview(result, z, gen)
+        ok = self._preview.start_remote_preview(build_generation, params)
+        if not ok:
+            self._panel.set_preview_status(
+                "Could not start 3D preview process — check that Python and "
+                "annotation_tool are importable from the working directory."
+            )
+            self._panel.set_preview_busy(False)
 
     def _on_vtk_render_finished(self, gen: int) -> None:
+        # Always release the UI on a finished/failed/disconnected event so the
+        # Start button can never get stuck grayed out. We still gate the
+        # "preview updated" status message on the live generation.
+        self._panel.set_preview_busy(False)
         if gen != self._vtk_render_generation:
             return
-        result = self._last_status_result
-        self._last_status_result = None
-        if result is None:
-            self._panel.set_preview_busy(False)
-            return
-        self._panel.set_preview_status(self._format_preview_status(result))
         self.status_message.emit("3D preview updated")
-        self._panel.set_preview_busy(False)
 
-    def _format_preview_status(self, result) -> str:
-        n_pts = len(result.points_xyz) if result.points_xyz is not None else 0
-        z_full, _, _ = result.shape_zyx
-        z_ds = result.intensity_u8.shape[0]
-        stz, sty, stx = result.stride_zyx
-        mode_labels = {
-            "solid": "Solid volume",
-            "isosurface": "Isosurface",
-            "mip": "Soft volume",
-            "point_cloud": "Point cloud",
-        }
-        mode = mode_labels.get(result.mode, result.mode)
-        level = result.preview_level
-        z_lo, z_hi = result.preview_z_range
-        range_limited = z_lo > 0 or z_hi < z_full - 1
-        if range_limited:
-            z_line = f"Range slices {z_lo + 1}–{z_hi + 1} of {z_full}"
-        elif stz <= 1 and z_ds >= (z_hi - z_lo + 1):
-            z_line = f"All {z_hi - z_lo + 1} slices in range"
-        else:
-            z_line = f"{z_ds} slabs in range (Z stride {stz})"
-        _, h_full, w_full = result.shape_zyx
-        h_ds = result.intensity_u8.shape[1] if result.intensity_u8.ndim >= 2 else 0
-        w_ds = result.intensity_u8.shape[2] if result.intensity_u8.ndim >= 3 else 0
-        if sty <= 1 and stx <= 1:
-            xy_line = "full XY resolution"
-        else:
-            xy_line = (
-                f"XY downsampled {sty}×{stx} "
-                f"({w_full}→{w_ds} px wide, saves RAM)"
-            )
-        if result.native_resolution:
-            level_line = f"Native resolution · stride {stz}×{sty}×{stx}"
-            gb = result.intensity_u8.nbytes / (1024.0**3)
-            native_note = f"\nPreview buffer ≈ {gb:.2f} GiB (uint8)"
-        else:
-            level_line = f"Stride Z={stz} · XY={sty}×{stx}"
-            if result.mode == "point_cloud":
-                level_line += f" · point sampling {level}/5"
-            native_note = ""
-        return (
-            f"{mode} ready · {level_line}\n{z_line}\n{xy_line}{native_note}"
-            + (f" · {n_pts:,} points" if n_pts else "")
-            + "\nDrag rotate · scroll zoom · right-drag pan"
-        )
+    def _on_preview_busy_changed(self, busy: bool) -> None:
+        """Mirror the proxy widget's busy flag onto the panel.
 
-    def _on_preview_failed(self, message: str) -> None:
-        self._last_status_result = None
-        self._panel.set_preview_status(f"Preview failed: {message}")
-        self.status_message.emit(f"3D preview failed: {message}")
-        self._panel.set_preview_busy(False)
+        This is the safety net for the case where the child process
+        disconnects or fails without sending a FINISHED message — the proxy
+        emits busy_changed(False) and we clear the panel state.
+        """
+        self._panel.set_preview_busy(bool(busy))
 
-    def _on_preview_thread_finished(self) -> None:
-        self._preview_thread = None
-        self._preview_worker = None
+    def shutdown_preview_process(self) -> None:
+        """Tear down the child 3D-preview process (called on app close)."""
+        try:
+            self._preview.shutdown()
+        except Exception:
+            pass
+
+    def prewarm_preview(self) -> None:
+        """Spawn the 3D-preview child process in the background.
+
+        Safe to call repeatedly — no-op if the child is already alive or
+        starting. The intent is to hide the VTK / PyVista import cost
+        (~1–2 s) behind whatever the user is doing in the main window so
+        that the first Start preview click feels instant.
+        """
+        try:
+            self._preview.prewarm()
+        except Exception:
+            pass
 
     def undo(self) -> bool:
         ok = self._label_model.undo()

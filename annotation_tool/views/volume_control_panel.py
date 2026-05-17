@@ -4,8 +4,10 @@ Control panel for 3D volume / voxel annotation mode.
 from typing import Tuple
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -14,9 +16,12 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from .toggle_switch import ToggleSwitch
 
 
 class VolumeControlPanel(QWidget):
@@ -36,6 +41,8 @@ class VolumeControlPanel(QWidget):
     preview_rebuild_requested = pyqtSignal()
     preview_stop_requested = pyqtSignal()
     preview_reset_view_requested = pyqtSignal()
+    preview_show_window_requested = pyqtSignal()
+    preview_hide_window_requested = pyqtSignal()
     preview_mode_changed = pyqtSignal(str)
     preview_show_mask_changed = pyqtSignal(bool)
     preview_settings_changed = pyqtSignal()
@@ -43,6 +50,40 @@ class VolumeControlPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumWidth(250)
+        # Match the 2D bounding-box panel's button + group-box styling so
+        # both annotation modes have a consistent look.
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #cccccc;
+                border-radius: 5px;
+                margin-top: 1ex;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                border: none;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -86,11 +127,8 @@ class VolumeControlPanel(QWidget):
         mode_row.addWidget(QLabel("Mode"))
         self.preview_mode_combo = QComboBox()
         self.preview_mode_combo.addItem(
-            "Isosurface (opaque, lit — best for tiny details)", "isosurface_lit"
+            "Isosurface (opaque, lit)", "isosurface_lit"
         )
-        self.preview_mode_combo.addItem("Isosurface (layered mesh)", "isosurface")
-        self.preview_mode_combo.addItem("Solid volume (raycast)", "solid")
-        self.preview_mode_combo.addItem("Soft volume (quick MIP)", "mip")
         self.preview_mode_combo.addItem("Point cloud", "point_cloud")
         self.preview_mode_combo.currentIndexChanged.connect(self._on_preview_mode_changed)
         mode_row.addWidget(self.preview_mode_combo)
@@ -136,23 +174,11 @@ class VolumeControlPanel(QWidget):
         self.preview_stride_hint.setStyleSheet("color: #888; font-size: 10px;")
         preview_layout.addWidget(self.preview_stride_hint)
 
-        point_row = QHBoxLayout()
-        point_row.addWidget(QLabel("Point sampling"))
-        self.preview_level_spin = QSpinBox()
-        self.preview_level_spin.setRange(1, 5)
-        self.preview_level_spin.setValue(5)
-        self.preview_level_spin.setToolTip(
-            "For Point cloud mode only: density and intensity threshold.\n"
-            "1 = fewer/louder points · 5 = more/softer points. Stride sliders still control the grid."
-        )
-        self.preview_level_spin.valueChanged.connect(self._emit_preview_settings_changed)
-        point_row.addWidget(self.preview_level_spin)
-        self.preview_level_label = QLabel("5 = dense")
-        self.preview_level_label.setStyleSheet("color: #aaa;")
-        point_row.addWidget(self.preview_level_label)
-        self.point_sampling_widget = QWidget()
-        self.point_sampling_widget.setLayout(point_row)
-        preview_layout.addWidget(self.point_sampling_widget)
+        # --- Mode-specific parameter pages -------------------------------
+        self._mode_param_stack = QStackedWidget()
+        self._mode_param_stack.addWidget(self._build_iso_param_page())   # idx 0
+        self._mode_param_stack.addWidget(self._build_point_param_page()) # idx 1
+        preview_layout.addWidget(self._mode_param_stack)
         self._sync_preview_mode_visibility()
 
         self.preview_native_check = QCheckBox("Native resolution (full grid, high RAM)")
@@ -208,9 +234,30 @@ class VolumeControlPanel(QWidget):
         preview_btn_row.addWidget(self.preview_stop_btn)
         preview_layout.addLayout(preview_btn_row)
 
+        window_btn_row = QHBoxLayout()
+        self.preview_show_window_btn = QPushButton("Show 3D window")
+        self.preview_show_window_btn.setToolTip(
+            "Open or bring forward the separate 3D preview window."
+        )
+        self.preview_show_window_btn.clicked.connect(
+            self.preview_show_window_requested.emit
+        )
+        window_btn_row.addWidget(self.preview_show_window_btn)
+
+        self.preview_hide_window_btn = QPushButton("Hide 3D window")
+        self.preview_hide_window_btn.setToolTip(
+            "Hide the separate 3D preview window without stopping the build."
+        )
+        self.preview_hide_window_btn.setEnabled(False)
+        self.preview_hide_window_btn.clicked.connect(
+            self.preview_hide_window_requested.emit
+        )
+        window_btn_row.addWidget(self.preview_hide_window_btn)
+        preview_layout.addLayout(window_btn_row)
+
         self.preview_reset_view_btn = QPushButton("Reset 3D view")
         self.preview_reset_view_btn.setToolTip(
-            "Reset the 3D camera to the default isometric view (or press Home with the 3D pane focused)."
+            "Reset the 3D camera to the default isometric view (or press Home in the 3D window)."
         )
         self.preview_reset_view_btn.clicked.connect(self.preview_reset_view_requested.emit)
         preview_layout.addWidget(self.preview_reset_view_btn)
@@ -251,19 +298,23 @@ class VolumeControlPanel(QWidget):
         nav_layout.addLayout(row)
         inner_layout.addWidget(nav_group)
 
-        wl_group = QGroupBox("Window / Level")
+        wl_group = QGroupBox("Display Brightness & Contrast")
         wl_layout = QVBoxLayout(wl_group)
+        brightness_label = QLabel("Brightness")
+        brightness_label.setToolTip("Slide right to brighten, left to darken.")
+        wl_layout.addWidget(brightness_label)
         self.wc_slider = QSlider(Qt.Horizontal)
         self.wc_slider.setRange(0, 65535)
         self.wc_slider.valueChanged.connect(lambda v: self.window_center_changed.emit(float(v)))
-        wl_layout.addWidget(QLabel("Center"))
         wl_layout.addWidget(self.wc_slider)
+        contrast_label = QLabel("Contrast")
+        contrast_label.setToolTip("Slide left for more contrast, right for less.")
+        wl_layout.addWidget(contrast_label)
         self.ww_slider = QSlider(Qt.Horizontal)
         self.ww_slider.setRange(1, 65535)
         self.ww_slider.valueChanged.connect(lambda v: self.window_width_changed.emit(float(v)))
-        wl_layout.addWidget(QLabel("Width"))
         wl_layout.addWidget(self.ww_slider)
-        reset_wl = QPushButton("Reset Display (like TIFF viewer)")
+        reset_wl = QPushButton("Reset Display")
         reset_wl.clicked.connect(self.reset_window_requested.emit)
         wl_layout.addWidget(reset_wl)
         inner_layout.addWidget(wl_group)
@@ -278,10 +329,18 @@ class VolumeControlPanel(QWidget):
         self.radius_spin.valueChanged.connect(self.brush_radius_changed.emit)
         radius_row.addWidget(self.radius_spin)
         brush_layout.addLayout(radius_row)
-        self.erase_btn = QPushButton("Eraser (toggle)")
-        self.erase_btn.setCheckable(True)
-        self.erase_btn.toggled.connect(self.erase_mode_changed.emit)
-        brush_layout.addWidget(self.erase_btn)
+        erase_row = QHBoxLayout()
+        erase_label = QLabel("Eraser")
+        erase_label.setToolTip("When ON, brush strokes erase labels instead of painting.")
+        erase_row.addWidget(erase_label)
+        erase_row.addStretch(1)
+        self.erase_switch = ToggleSwitch()
+        self.erase_switch.setToolTip("Toggle eraser mode on/off.")
+        self.erase_switch.toggled.connect(self.erase_mode_changed.emit)
+        erase_row.addWidget(self.erase_switch)
+        brush_layout.addLayout(erase_row)
+        # Backward-compat alias for any code that still pokes the old attribute.
+        self.erase_btn = self.erase_switch
         inner_layout.addWidget(brush_group)
 
         class_group = QGroupBox("Class")
@@ -398,7 +457,17 @@ class VolumeControlPanel(QWidget):
 
     def get_preview_mode(self) -> str:
         mode = self.preview_mode_combo.currentData()
-        return str(mode) if mode else "point_cloud"
+        return str(mode) if mode else "isosurface_lit"
+
+    def set_preview_mode(self, mode: str) -> None:
+        target = "isosurface_lit" if mode == "isosurface_lit" else "point_cloud"
+        self.preview_mode_combo.blockSignals(True)
+        for i in range(self.preview_mode_combo.count()):
+            if self.preview_mode_combo.itemData(i) == target:
+                self.preview_mode_combo.setCurrentIndex(i)
+                break
+        self.preview_mode_combo.blockSignals(False)
+        self._sync_preview_mode_visibility()
 
     def get_preview_level(self) -> int:
         return int(self.preview_level_spin.value())
@@ -408,6 +477,87 @@ class VolumeControlPanel(QWidget):
         self.preview_level_spin.setValue(max(1, min(5, int(level))))
         self.preview_level_spin.blockSignals(False)
         self._update_level_hint()
+
+    # --- Isosurface params ------------------------------------------------
+
+    def get_preview_iso_color(self) -> str:
+        return self._iso_color_hex
+
+    def set_preview_iso_color(self, hex_color: str) -> None:
+        color = QColor(hex_color) if hex_color else QColor("#dcdcdc")
+        if not color.isValid():
+            color = QColor("#dcdcdc")
+        self._iso_color_hex = color.name()
+        self._refresh_iso_color_button()
+
+    def _refresh_iso_color_button(self) -> None:
+        if not hasattr(self, "preview_iso_color_btn"):
+            return
+        hex_color = self._iso_color_hex or "#dcdcdc"
+        text_color = self._readable_text_color(hex_color)
+        # Override the panel-wide green button styling for this swatch only.
+        self.preview_iso_color_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {hex_color}; color: {text_color}; "
+            f"  border: 1px solid #555; border-radius: 4px; padding: 4px 8px; }}"
+            f"QPushButton:hover {{ border: 1px solid #aaa; }}"
+            f"QPushButton:disabled {{ color: #888; border: 1px solid #444; }}"
+        )
+        self.preview_iso_color_btn.setText(hex_color.upper())
+
+    @staticmethod
+    def _readable_text_color(hex_color: str) -> str:
+        c = QColor(hex_color)
+        if not c.isValid():
+            return "#000000"
+        # Standard luminance threshold — dark text on light swatches, light on dark.
+        luminance = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255.0
+        return "#101010" if luminance > 0.55 else "#f0f0f0"
+
+    def _on_iso_color_clicked(self) -> None:
+        initial = QColor(self._iso_color_hex or "#dcdcdc")
+        color = QColorDialog.getColor(
+            initial, self, "Pick isosurface color"
+        )
+        if not color.isValid():
+            return
+        hex_color = color.name()
+        if hex_color == self._iso_color_hex:
+            return
+        self._iso_color_hex = hex_color
+        self._refresh_iso_color_button()
+        self._emit_preview_settings_changed()
+
+    # --- Point cloud params -----------------------------------------------
+
+    def get_preview_point_size(self) -> float:
+        return self.preview_point_size_slider.value() / 10.0
+
+    def set_preview_point_size(self, value: float) -> None:
+        raw = int(round(max(1.0, min(20.0, float(value))) * 10))
+        self.preview_point_size_slider.blockSignals(True)
+        self.preview_point_size_slider.setValue(raw)
+        self.preview_point_size_slider.blockSignals(False)
+        self.preview_point_size_value.setText(f"{raw / 10.0:.1f}")
+
+    def is_preview_point_threshold_auto(self) -> bool:
+        return self.preview_point_threshold_auto.isChecked()
+
+    def set_preview_point_threshold_auto(self, enabled: bool) -> None:
+        self.preview_point_threshold_auto.blockSignals(True)
+        self.preview_point_threshold_auto.setChecked(bool(enabled))
+        self.preview_point_threshold_auto.blockSignals(False)
+        self._update_point_threshold_enabled()
+
+    def get_preview_point_threshold(self) -> int:
+        return int(self.preview_point_threshold_slider.value())
+
+    def set_preview_point_threshold(self, value: int) -> None:
+        self.preview_point_threshold_slider.blockSignals(True)
+        self.preview_point_threshold_slider.setValue(max(0, min(255, int(value))))
+        self.preview_point_threshold_slider.blockSignals(False)
+        self.preview_point_threshold_value.setText(
+            str(int(self.preview_point_threshold_slider.value()))
+        )
 
     def get_preview_stride_z(self) -> int:
         return int(self.preview_stride_z_slider.value())
@@ -429,11 +579,123 @@ class VolumeControlPanel(QWidget):
         self.preview_stride_xy_value.setText(str(self.preview_stride_xy_slider.value()))
         self._update_stride_hint()
 
+    # --- Mode-specific parameter page builders ---------------------------
+
+    def _build_iso_param_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
+
+        color_row = QHBoxLayout()
+        color_label = QLabel("Surface color")
+        color_label.setToolTip("Color of the rendered isosurface mesh.")
+        color_row.addWidget(color_label)
+        self._iso_color_hex = "#dcdcdc"
+        self.preview_iso_color_btn = QPushButton()
+        self.preview_iso_color_btn.setToolTip("Click to choose the isosurface color.")
+        self.preview_iso_color_btn.setMinimumWidth(60)
+        self.preview_iso_color_btn.setMinimumHeight(22)
+        self.preview_iso_color_btn.clicked.connect(self._on_iso_color_clicked)
+        color_row.addWidget(self.preview_iso_color_btn, 1)
+        layout.addLayout(color_row)
+        self._refresh_iso_color_button()
+        return page
+
+    def _build_point_param_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
+
+        density_row = QHBoxLayout()
+        density_row.addWidget(QLabel("Density"))
+        self.preview_level_spin = QSpinBox()
+        self.preview_level_spin.setRange(1, 5)
+        self.preview_level_spin.setValue(5)
+        self.preview_level_spin.setToolTip(
+            "Point-cloud density preset (1 = sparse · 5 = dense). Also sets the\n"
+            "automatic intensity threshold unless overridden below."
+        )
+        self.preview_level_spin.valueChanged.connect(self._on_point_level_changed)
+        density_row.addWidget(self.preview_level_spin)
+        self.preview_level_label = QLabel("5 = dense")
+        self.preview_level_label.setStyleSheet("color: #aaa;")
+        density_row.addWidget(self.preview_level_label)
+        layout.addLayout(density_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Point size"))
+        self.preview_point_size_slider = QSlider(Qt.Horizontal)
+        self.preview_point_size_slider.setRange(10, 200)  # 1.0 .. 20.0 ×10
+        self.preview_point_size_slider.setValue(30)
+        self.preview_point_size_slider.setToolTip(
+            "Rendered size of each point in pixels (1.0–20.0). Larger points fill\n"
+            "gaps in sparse clouds; smaller points show structure better."
+        )
+        self.preview_point_size_slider.valueChanged.connect(self._on_point_size_changed)
+        size_row.addWidget(self.preview_point_size_slider)
+        self.preview_point_size_value = QLabel("3.0")
+        self.preview_point_size_value.setMinimumWidth(32)
+        self.preview_point_size_value.setStyleSheet("color: #aaa;")
+        size_row.addWidget(self.preview_point_size_value)
+        layout.addLayout(size_row)
+
+        thr_row = QHBoxLayout()
+        thr_row.addWidget(QLabel("Threshold"))
+        self.preview_point_threshold_slider = QSlider(Qt.Horizontal)
+        self.preview_point_threshold_slider.setRange(0, 255)
+        self.preview_point_threshold_slider.setValue(25)
+        self.preview_point_threshold_slider.setToolTip(
+            "Intensity (0–255) above which a voxel becomes a point.\n"
+            "Lower = more points (denser cloud) · Higher = only the brightest."
+        )
+        self.preview_point_threshold_slider.valueChanged.connect(self._on_point_threshold_slider)
+        thr_row.addWidget(self.preview_point_threshold_slider)
+        self.preview_point_threshold_value = QLabel("25")
+        self.preview_point_threshold_value.setMinimumWidth(28)
+        self.preview_point_threshold_value.setStyleSheet("color: #aaa;")
+        thr_row.addWidget(self.preview_point_threshold_value)
+        layout.addLayout(thr_row)
+
+        self.preview_point_threshold_auto = QCheckBox("Auto threshold (from Density)")
+        self.preview_point_threshold_auto.setChecked(True)
+        self.preview_point_threshold_auto.toggled.connect(self._on_point_threshold_auto_toggled)
+        layout.addWidget(self.preview_point_threshold_auto)
+
+        self._update_point_threshold_enabled()
+        return page
+
+    # --- mode-specific event handlers ------------------------------------
+
+    def _on_point_level_changed(self, _value: int) -> None:
+        self._update_level_hint()
+        self._emit_preview_settings_changed()
+
+    def _on_point_size_changed(self, raw: int) -> None:
+        value = raw / 10.0
+        self.preview_point_size_value.setText(f"{value:.1f}")
+        self._emit_preview_settings_changed()
+
+    def _on_point_threshold_slider(self, value: int) -> None:
+        self.preview_point_threshold_value.setText(str(int(value)))
+        self._emit_preview_settings_changed()
+
+    def _on_point_threshold_auto_toggled(self, checked: bool) -> None:
+        del checked
+        self._update_point_threshold_enabled()
+        self._emit_preview_settings_changed()
+
+    def _update_point_threshold_enabled(self) -> None:
+        auto = self.preview_point_threshold_auto.isChecked()
+        self.preview_point_threshold_slider.setEnabled(not auto)
+        self.preview_point_threshold_value.setEnabled(not auto)
+
     def _sync_preview_mode_visibility(self) -> None:
-        if not hasattr(self, "point_sampling_widget"):
+        if not hasattr(self, "_mode_param_stack"):
             return
         mode = self.get_preview_mode()
-        self.point_sampling_widget.setVisible(mode == "point_cloud")
+        self._mode_param_stack.setCurrentIndex(0 if mode == "isosurface_lit" else 1)
 
     def is_preview_native_resolution(self) -> bool:
         return self.preview_native_check.isChecked()
@@ -536,4 +798,19 @@ class VolumeControlPanel(QWidget):
         self.preview_stride_z_slider.setEnabled(not busy and not native)
         self.preview_stride_xy_slider.setEnabled(not busy and not native)
         self.preview_native_check.setEnabled(not busy)
-        self.preview_level_spin.setEnabled(not busy and self.get_preview_mode() == "point_cloud")
+        is_pc = self.get_preview_mode() == "point_cloud"
+        is_iso = not is_pc
+        # Isosurface params.
+        self.preview_iso_color_btn.setEnabled(not busy and is_iso)
+        # Point-cloud params.
+        self.preview_level_spin.setEnabled(not busy and is_pc)
+        self.preview_point_size_slider.setEnabled(not busy and is_pc)
+        self.preview_point_threshold_auto.setEnabled(not busy and is_pc)
+        self.preview_point_threshold_slider.setEnabled(
+            not busy and is_pc and not self.preview_point_threshold_auto.isChecked()
+        )
+
+    def set_preview_window_visible(self, visible: bool) -> None:
+        """Reflect the child 3D window's open/closed state in the buttons."""
+        self.preview_show_window_btn.setEnabled(not visible)
+        self.preview_hide_window_btn.setEnabled(bool(visible))

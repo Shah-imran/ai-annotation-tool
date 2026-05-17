@@ -74,9 +74,38 @@ class MainWindow(QMainWindow):
         # Set application icon (if available)
         self.setWindowIcon(QIcon())
         
-        # Stacked workspaces: 2D bbox vs 3D volume
+        # Stacked workspaces: 2D bbox vs 3D volume. A horizontal mode tab
+        # bar sits as a second row directly under the menubar; the stacked
+        # workspaces sit below it.
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        self._mode_tab_bar = QTabBar()
+        self._mode_tab_bar.setShape(QTabBar.RoundedNorth)
+        self._mode_tab_bar.setExpanding(False)
+        self._mode_tab_bar.setUsesScrollButtons(False)
+        self._mode_tab_bar.setDrawBase(False)
+        self._mode_tab_bar.addTab("2D Bounding Box")
+        self._mode_tab_bar.addTab("3D Volume")
+        self._mode_tab_bar.setTabToolTip(0, "2D bounding-box annotation")
+        self._mode_tab_bar.setTabToolTip(1, "3D volume / voxel annotation")
+        self._mode_tab_bar.currentChanged.connect(self._on_mode_tab_changed)
+
+        tab_strip = QWidget()
+        tab_strip.setObjectName("modeTabStrip")
+        tab_strip_layout = QHBoxLayout(tab_strip)
+        tab_strip_layout.setContentsMargins(6, 4, 6, 0)
+        tab_strip_layout.setSpacing(0)
+        tab_strip_layout.addWidget(self._mode_tab_bar)
+        tab_strip_layout.addStretch(1)
+
         self._stack = QStackedWidget()
-        self.setCentralWidget(self._stack)
+
+        central_layout.addWidget(tab_strip)
+        central_layout.addWidget(self._stack, 1)
+        self.setCentralWidget(central)
 
         # --- 2D workspace ---
         workspace_2d = QWidget()
@@ -122,14 +151,9 @@ class MainWindow(QMainWindow):
         """Setup the menu bar."""
         menubar = self.menuBar()
 
-        # Mode tabs (left corner): 2D vs 3D
-        self._mode_tab_bar = QTabBar()
-        self._mode_tab_bar.addTab("2D Bounding Box")
-        self._mode_tab_bar.addTab("3D Volume")
-        self._mode_tab_bar.setExpanding(False)
-        self._mode_tab_bar.currentChanged.connect(self._on_mode_tab_changed)
-        menubar.setCornerWidget(self._mode_tab_bar, Qt.TopLeftCorner)
-        
+        # Note: the 2D/3D mode tabs live in the left-side vertical tab bar
+        # created in _setup_ui — the menubar stays clean.
+
         # Add toggle switch to top right corner of menu bar
         # Create a widget to hold the toggle
         toggle_widget = QWidget()
@@ -305,28 +329,9 @@ class MainWindow(QMainWindow):
         volume_menu.addAction(vol_next)
         self._actions_3d_only.append(vol_next)
 
-        volume_menu.addSeparator()
-
-        self.toggle_volume_preview_action = QAction('Show &3D Preview', self)
-        self.toggle_volume_preview_action.setCheckable(True)
-        self.toggle_volume_preview_action.setChecked(True)
-        self.toggle_volume_preview_action.triggered.connect(self._toggle_volume_preview_pane)
-        volume_menu.addAction(self.toggle_volume_preview_action)
-        self._actions_3d_only.append(self.toggle_volume_preview_action)
-
-        self.toggle_volume_slice_action = QAction('Show &2D Slice', self)
-        self.toggle_volume_slice_action.setCheckable(True)
-        self.toggle_volume_slice_action.setChecked(True)
-        self.toggle_volume_slice_action.triggered.connect(self._toggle_volume_slice_pane)
-        volume_menu.addAction(self.toggle_volume_slice_action)
-        self._actions_3d_only.append(self.toggle_volume_slice_action)
-
-        self.volume_workspace.preview_pane_collapsed_changed.connect(
-            self._on_volume_preview_pane_collapsed
-        )
-        self.volume_workspace.slice_pane_collapsed_changed.connect(
-            self._on_volume_slice_pane_collapsed
-        )
+        # The 3D preview pane lives in its own process window (driven from
+        # the 3D Preview group in the right-hand panel). The 2D slice pane
+        # is always visible — no minimize/show toggles in the Volume menu.
 
         self._volume_menu = volume_menu
 
@@ -406,6 +411,31 @@ class MainWindow(QMainWindow):
             background-color: #3c3c3c;
             color: #ffffff;
             border-top: 1px solid #555555;
+        }
+        QWidget#modeTabStrip {
+            background-color: #2b2b2b;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        QTabBar::tab {
+            background-color: #333333;
+            color: #cccccc;
+            padding: 6px 18px;
+            margin-right: 2px;
+            border: 1px solid #3a3a3a;
+            border-bottom: none;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            min-width: 130px;
+            font-weight: bold;
+        }
+        QTabBar::tab:selected {
+            background-color: #4CAF50;
+            color: #ffffff;
+            border-color: #4CAF50;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #3a3a3a;
+            color: #ffffff;
         }
         QSplitter::handle {
             background-color: #555555;
@@ -676,23 +706,6 @@ class MainWindow(QMainWindow):
             if canvas_size > 0:
                 self.splitter.setSizes([canvas_size, width])
     
-    def _toggle_volume_preview_pane(self, checked: bool) -> None:
-        self.volume_workspace.set_preview_collapsed(not checked)
-
-    def _toggle_volume_slice_pane(self, checked: bool) -> None:
-        self.volume_workspace.set_slice_collapsed(not checked)
-
-    def _on_volume_preview_pane_collapsed(self, collapsed: bool) -> None:
-        if hasattr(self, "toggle_volume_preview_action"):
-            self.toggle_volume_preview_action.blockSignals(True)
-            self.toggle_volume_preview_action.setChecked(not collapsed)
-            self.toggle_volume_preview_action.blockSignals(False)
-
-    def _on_volume_slice_pane_collapsed(self, collapsed: bool) -> None:
-        if hasattr(self, "toggle_volume_slice_action"):
-            self.toggle_volume_slice_action.blockSignals(True)
-            self.toggle_volume_slice_action.setChecked(not collapsed)
-            self.toggle_volume_slice_action.blockSignals(False)
 
     def _active_splitter(self):
         if self.is_volume_mode():

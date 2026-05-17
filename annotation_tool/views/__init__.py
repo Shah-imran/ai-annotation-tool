@@ -8,9 +8,11 @@ from .volume_workspace import VolumeWorkspace
 from .slice_canvas import SliceCanvas
 from .volume_control_panel import VolumeControlPanel
 from .volume_preview_3d import VolumePreview3D
+from .remote_volume_preview_3d import RemoteVolumePreview3D
 
 __all__ = [
     'MainWindow', 'ImageCanvas', 'ControlPanel', 'ToggleSwitch', 'BoxSelectionDialog',
     'VolumeWorkspace', 'SliceCanvas', 'VolumeControlPanel', 'VolumePreview3D',
+    'RemoteVolumePreview3D',
 ]
 

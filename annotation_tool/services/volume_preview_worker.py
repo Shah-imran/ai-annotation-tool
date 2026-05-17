@@ -23,7 +23,7 @@ class VolumePreviewWorker(QObject):
         self._source_z_indices: List[int] = []
         self._full_shape_zyx: Tuple[int, int, int] = (0, 0, 0)
         self._spacing_xyz: Tuple[float, float, float] = (1.0, 1.0, 1.0)
-        self._mode: str = "mip"
+        self._mode: str = "isosurface_lit"
         self._window_center: float = 0.0
         self._window_width: float = 1.0
         self._use_window_level: bool = False
@@ -34,6 +34,11 @@ class VolumePreviewWorker(QObject):
         self._stride_zyx: Optional[Tuple[int, int, int]] = None
         self._label_path: str = ""
         self._label_shape: Tuple[int, int, int] = (0, 0, 0)
+        # Point-cloud-only knobs.
+        self._point_size: float = 3.0
+        self._point_threshold_override: Optional[int] = None
+        # Isosurface-only knobs.
+        self._iso_color: str = "#dcdcdc"
 
     def configure(
         self,
@@ -52,6 +57,9 @@ class VolumePreviewWorker(QObject):
         label_path: str = "",
         label_shape: Tuple[int, int, int] = (0, 0, 0),
         stride_zyx: Optional[Tuple[int, int, int]] = None,
+        point_size: float = 3.0,
+        point_threshold_override: Optional[int] = None,
+        iso_color: str = "#dcdcdc",
     ) -> None:
         self._slice_paths = slice_paths
         self._spacing_xyz = spacing_xyz
@@ -72,6 +80,9 @@ class VolumePreviewWorker(QObject):
         self._label_path = label_path
         self._label_shape = label_shape
         self._stride_zyx = stride_zyx
+        self._point_size = float(point_size)
+        self._point_threshold_override = point_threshold_override
+        self._iso_color = str(iso_color or "#dcdcdc")
 
     @pyqtSlot()
     def request_cancel(self) -> None:
@@ -114,6 +125,9 @@ class VolumePreviewWorker(QObject):
                 full_shape_zyx=self._full_shape_zyx,
                 progress_callback=on_progress,
                 should_cancel=self._should_cancel,
+                point_size=self._point_size,
+                point_threshold_override=self._point_threshold_override,
+                iso_color=self._iso_color,
             )
             if self._should_cancel():
                 return

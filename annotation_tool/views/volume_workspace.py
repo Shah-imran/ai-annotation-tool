@@ -1,21 +1,32 @@
 """
-Workspace widget for 3D volume annotation (3D preview + slice viewer + control panel).
+Workspace widget for 3D volume annotation (2D slice viewer + control panel).
+
+The 3D preview now runs in a separate process and is driven entirely from
+the volume control panel on the right — there is no in-window 3D pane any
+more. The 2D slice canvas is shown directly (no collapse/minimize chrome)
+because there's nothing else to share vertical space with.
+
+The RemoteVolumePreview3D proxy is still owned by this workspace for
+lifetime management, but it is intentionally invisible and is not added to
+the layout.
 """
 from typing import List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QSplitter, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
-from .collapsible_view_pane import CollapsibleViewPane
+from .remote_volume_preview_3d import RemoteVolumePreview3D
 from .slice_canvas import SliceCanvas
 from .volume_control_panel import VolumeControlPanel
-from .volume_preview_3d import VolumePreview3D
 
 
 class VolumeWorkspace(QWidget):
-    """Splitter: [ 3D preview | slice canvas ] + volume control panel."""
+    """Splitter: [ 2D slice canvas ] + volume control panel."""
 
     splitter_layout_changed = pyqtSignal(list, list)
+    # Kept for backwards-compatibility with the main window/controller; neither
+    # the 3D pane nor the slice-pane collapse feature exists anymore, so these
+    # signals are never emitted.
     preview_pane_collapsed_changed = pyqtSignal(bool)
     slice_pane_collapsed_changed = pyqtSignal(bool)
 
@@ -24,28 +35,26 @@ class VolumeWorkspace(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.preview_3d = VolumePreview3D()
+        # Headless proxy — parented for lifetime, never shown.
+        self.preview_3d = RemoteVolumePreview3D(self)
+
         self.slice_canvas = SliceCanvas()
         self.control_panel = VolumeControlPanel()
 
-        self.preview_pane = CollapsibleViewPane("3D Preview", self.preview_3d)
-        self.slice_pane = CollapsibleViewPane("2D Slice", self.slice_canvas)
-
-        self._saved_preview_height = 280
-        self._saved_slice_height = 520
-        self._updating_splitter = False
+        # The slice canvas no longer needs a collapsible wrapper — show it
+        # directly. We still expose a `view_splitter` so any persistence code
+        # that asks for vertical splitter sizes keeps working (it holds one
+        # widget now).
+        slice_holder = QWidget()
+        slice_layout = QVBoxLayout(slice_holder)
+        slice_layout.setContentsMargins(0, 0, 0, 0)
+        slice_layout.addWidget(self.slice_canvas)
 
         self.view_splitter = QSplitter(Qt.Vertical)
         self.view_splitter.setObjectName("volumeViewSplitter")
-        self.view_splitter.addWidget(self.preview_pane)
-        self.view_splitter.addWidget(self.slice_pane)
+        self.view_splitter.addWidget(slice_holder)
         self.view_splitter.setStretchFactor(0, 1)
-        self.view_splitter.setStretchFactor(1, 2)
-        self.view_splitter.setSizes([280, 520])
         self.view_splitter.splitterMoved.connect(self._on_splitter_moved)
-
-        self.preview_pane.collapse_changed.connect(self._on_preview_collapse_changed)
-        self.slice_pane.collapse_changed.connect(self._on_slice_collapse_changed)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setObjectName("volumeMainSplitter")
@@ -58,78 +67,33 @@ class VolumeWorkspace(QWidget):
 
         layout.addWidget(self.splitter)
 
+    # ----- splitter / pane state ----------------------------------------
+
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         del pos, index
-        if self._updating_splitter:
-            return
-        sizes = self.view_splitter.sizes()
-        if len(sizes) == 2:
-            if not self.preview_pane.is_collapsed and sizes[0] > CollapsibleViewPane.COLLAPSED_SPLITTER_SIZE:
-                self._saved_preview_height = sizes[0]
-            if not self.slice_pane.is_collapsed and sizes[1] > CollapsibleViewPane.COLLAPSED_SPLITTER_SIZE:
-                self._saved_slice_height = sizes[1]
         self._emit_splitter_layout()
 
-    def _on_preview_collapse_changed(self, collapsed: bool) -> None:
-        self._apply_vertical_split_for_collapse()
-        self.preview_pane_collapsed_changed.emit(collapsed)
-
-    def _on_slice_collapse_changed(self, collapsed: bool) -> None:
-        self._apply_vertical_split_for_collapse()
-        self.slice_pane_collapsed_changed.emit(collapsed)
-
-    def _apply_vertical_split_for_collapse(self) -> None:
-        self._updating_splitter = True
-        try:
-            total = max(200, sum(self.view_splitter.sizes()))
-            mini = CollapsibleViewPane.COLLAPSED_SPLITTER_SIZE
-            preview_collapsed = self.preview_pane.is_collapsed
-            slice_collapsed = self.slice_pane.is_collapsed
-
-            if preview_collapsed and slice_collapsed:
-                self.view_splitter.setSizes([mini, mini])
-            elif preview_collapsed:
-                self.view_splitter.setSizes([mini, total - mini])
-            elif slice_collapsed:
-                self.view_splitter.setSizes([total - mini, mini])
-            else:
-                preview_h = max(80, self._saved_preview_height)
-                slice_h = max(80, self._saved_slice_height)
-                scale = total / max(1, preview_h + slice_h)
-                self.view_splitter.setSizes(
-                    [int(preview_h * scale), int(slice_h * scale)]
-                )
-        finally:
-            self._updating_splitter = False
-        self._emit_splitter_layout()
+    # ----- collapse stubs (no-op now) -----------------------------------
 
     def set_preview_collapsed(self, collapsed: bool) -> None:
-        self.preview_pane.set_collapsed(collapsed, emit_signal=False)
-        self._apply_vertical_split_for_collapse()
-        self.preview_pane_collapsed_changed.emit(collapsed)
-
-    def set_slice_collapsed(self, collapsed: bool) -> None:
-        self.slice_pane.set_collapsed(collapsed, emit_signal=False)
-        self._apply_vertical_split_for_collapse()
-        self.slice_pane_collapsed_changed.emit(collapsed)
+        del collapsed
 
     def is_preview_collapsed(self) -> bool:
-        return self.preview_pane.is_collapsed
-
-    def is_slice_collapsed(self) -> bool:
-        return self.slice_pane.is_collapsed
+        return True
 
     def toggle_preview_pane(self) -> bool:
-        """Toggle 3D preview; returns new collapsed state."""
-        collapsed = not self.preview_pane.is_collapsed
-        self.set_preview_collapsed(collapsed)
-        return collapsed
+        return True
+
+    def set_slice_collapsed(self, collapsed: bool) -> None:
+        del collapsed
+
+    def is_slice_collapsed(self) -> bool:
+        return False
 
     def toggle_slice_pane(self) -> bool:
-        """Toggle 2D slice view; returns new collapsed state."""
-        collapsed = not self.slice_pane.is_collapsed
-        self.set_slice_collapsed(collapsed)
-        return collapsed
+        return False
+
+    # ----- persistence --------------------------------------------------
 
     def _emit_splitter_layout(self) -> None:
         self.splitter_layout_changed.emit(
@@ -143,17 +107,11 @@ class VolumeWorkspace(QWidget):
         horizontal: Optional[List[int]] = None,
     ) -> None:
         """Restore saved splitter sizes (called on startup / mode switch)."""
-        if vertical and len(vertical) == 2 and sum(vertical) > 0:
-            if not self.preview_pane.is_collapsed:
-                self._saved_preview_height = vertical[0]
-            if not self.slice_pane.is_collapsed:
-                self._saved_slice_height = vertical[1]
-            if not self.preview_pane.is_collapsed and not self.slice_pane.is_collapsed:
-                self._updating_splitter = True
-                self.view_splitter.setSizes(vertical)
-                self._updating_splitter = False
-            else:
-                self._apply_vertical_split_for_collapse()
+        if vertical and sum(vertical) > 0:
+            total = sum(vertical)
+            self.view_splitter.blockSignals(True)
+            self.view_splitter.setSizes([total])
+            self.view_splitter.blockSignals(False)
         if horizontal and len(horizontal) == 2 and sum(horizontal) > 0:
             self.splitter.blockSignals(True)
             self.splitter.setSizes(horizontal)
@@ -162,7 +120,5 @@ class VolumeWorkspace(QWidget):
     def apply_pane_collapsed_state(
         self, preview_collapsed: bool, slice_collapsed: bool
     ) -> None:
-        """Restore minimize/expand state without duplicate signals."""
-        self.preview_pane.set_collapsed(preview_collapsed, emit_signal=False)
-        self.slice_pane.set_collapsed(slice_collapsed, emit_signal=False)
-        self._apply_vertical_split_for_collapse()
+        """Backwards-compatible stub. Collapse no longer exists in 3D mode."""
+        del preview_collapsed, slice_collapsed

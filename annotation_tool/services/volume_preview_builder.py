@@ -19,7 +19,7 @@ class PreviewBuildCancelled(Exception):
 class VolumePreviewResult:
     """Data for the 3D preview widget."""
 
-    mode: str  # "solid" | "isosurface" | "mip" | "point_cloud"
+    mode: str  # "isosurface_lit" | "point_cloud" (legacy modes still accepted)
     intensity_u8: np.ndarray  # (Z', H', W') downsampled
     spacing_zyx: Tuple[float, float, float]  # (sz, sy, sx) per full-resolution voxel
     shape_zyx: Tuple[int, int, int]  # full volume shape (Z, H, W)
@@ -33,6 +33,11 @@ class VolumePreviewResult:
     preview_level: int = 5
     preview_z_range: Tuple[int, int] = (0, 0)  # inclusive full-volume Z indices used
     native_resolution: bool = False  # stride 1×1×1 (no XY/Z downsampling for loaded slabs)
+    # Point-cloud rendering hint (size only — the rest stays hard-coded so the
+    # point-cloud look is consistent across builds).
+    point_size: float = 3.0
+    # Isosurface ("isosurface_lit") mesh color as a `#RRGGBB` string.
+    iso_color: str = "#dcdcdc"
 
     @property
     def spacing_effective_zyx(self) -> Tuple[float, float, float]:
@@ -319,6 +324,11 @@ def build_preview(
     native_full_volume: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    # Point-cloud-only overrides:
+    point_size: float = 3.0,
+    point_threshold_override: Optional[int] = None,
+    # Isosurface-only overrides:
+    iso_color: str = "#dcdcdc",
 ) -> VolumePreviewResult:
     """
     Build preview payload for the 3D widget.
@@ -333,8 +343,9 @@ def build_preview(
     level = clamp_level(preview_level)
     level_params = params_for_level(mode, level)
 
-    volume_modes = ("solid", "isosurface", "mip")
-    use_max_pool = mode in volume_modes
+    # Anything that builds a 3D grid (anything other than point_cloud) benefits
+    # from max-pool downsampling to preserve features.
+    use_max_pool = mode != "point_cloud"
 
     z_count = len(slice_paths)
     if source_z_indices is None:
@@ -383,12 +394,18 @@ def build_preview(
 
     points, scalars = None, None
     if mode == "point_cloud" and intensity.size > 0:
+        threshold_value = (
+            int(point_threshold_override)
+            if point_threshold_override is not None
+            else level_params.point_threshold
+        )
+        threshold_value = max(0, min(255, threshold_value))
         points, scalars = build_point_cloud(
             intensity,
             spacing_zyx,
             stride,
             z_indices,
-            threshold=level_params.point_threshold,
+            threshold=threshold_value,
             max_points=level_params.point_max_points,
         )
 
@@ -403,11 +420,21 @@ def build_preview(
             should_cancel=should_cancel,
         )
 
+    # Restore the original isosurface threshold logic: only the layered
+    # "isosurface" mode gets the 55th-percentile auto-pick; the opaque
+    # "isosurface_lit" mode keeps the fixed 128.0 default that produced
+    # the look we had before the per-mode panel knobs were added.
     iso_level = 128.0
     if mode == "isosurface" and intensity.size > 0:
         nonzero = intensity[intensity > 0]
         if nonzero.size > 0:
             iso_level = float(np.percentile(nonzero, 55))
+
+    # Normalise iso color: must look like `#rrggbb`. Fall back to the default
+    # neutral gray on anything weird so downstream VTK code never blows up.
+    iso_hex = (iso_color or "#dcdcdc").strip()
+    if not (iso_hex.startswith("#") and len(iso_hex) == 7):
+        iso_hex = "#dcdcdc"
 
     return VolumePreviewResult(
         mode=mode,
@@ -424,4 +451,6 @@ def build_preview(
         point_scalars=scalars,
         mask_points_xyz=mask_pts if mask_pts is not None and len(mask_pts) else None,
         mask_scalars=mask_sc if mask_sc is not None and len(mask_sc) else None,
+        point_size=float(max(0.5, point_size)),
+        iso_color=iso_hex,
     )

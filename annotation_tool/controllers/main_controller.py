@@ -328,12 +328,6 @@ class MainController(QObject):
         self._main_window.volume_workspace.splitter_layout_changed.connect(
             self._on_volume_splitter_layout_changed
         )
-        self._main_window.volume_workspace.preview_pane_collapsed_changed.connect(
-            self._on_volume_preview_pane_collapsed
-        )
-        self._main_window.volume_workspace.slice_pane_collapsed_changed.connect(
-            self._on_volume_slice_pane_collapsed
-        )
         self._main_window.volume_workspace.control_panel.preview_settings_changed.connect(
             self._on_volume_preview_settings_changed
         )
@@ -1482,6 +1476,12 @@ class MainController(QObject):
 
     def _on_annotation_mode_changed(self, mode: str):
         self._settings_model.set_last_annotation_mode(mode)
+        # Pre-spawn the 3D preview child process the moment the user enters
+        # 3D mode (including silent session restore on startup), so the
+        # VTK / PyVista import cost is paid off-screen and the first
+        # Start preview click feels instantaneous.
+        if mode == "3d":
+            self._volume_controller.prewarm_preview()
         if self._initializing:
             return
         label = "2D bounding box" if mode == "2d" else "3D volume"
@@ -1535,37 +1535,17 @@ class MainController(QObject):
     def _on_volume_splitter_layout_changed(
         self, vertical_sizes: list, horizontal_sizes: list
     ) -> None:
-        if len(vertical_sizes) == 2 and sum(vertical_sizes) > 0:
-            self._settings_model.set_volume_splitter_vertical(vertical_sizes)
+        if vertical_sizes and sum(vertical_sizes) > 0:
+            self._settings_model.set_volume_splitter_vertical(list(vertical_sizes))
         if len(horizontal_sizes) == 2 and horizontal_sizes[1] > 0:
             self._settings_model.set_volume_splitter_horizontal(horizontal_sizes)
 
     def _apply_volume_splitter_sizes(self) -> None:
         ws = self._main_window.volume_workspace
-        ws.apply_pane_collapsed_state(
-            self._settings_model.get_volume_preview_collapsed(),
-            self._settings_model.get_volume_slice_collapsed(),
-        )
         ws.apply_splitter_sizes(
             self._settings_model.get_volume_splitter_vertical(),
             self._settings_model.get_volume_splitter_horizontal(),
         )
-        self._sync_volume_pane_menu_checks()
-
-    def _sync_volume_pane_menu_checks(self) -> None:
-        ws = self._main_window.volume_workspace
-        mw = self._main_window
-        if hasattr(mw, "toggle_volume_preview_action"):
-            mw.toggle_volume_preview_action.blockSignals(True)
-            mw.toggle_volume_preview_action.setChecked(not ws.is_preview_collapsed())
-            mw.toggle_volume_preview_action.blockSignals(False)
-        if hasattr(mw, "toggle_volume_slice_action"):
-            mw.toggle_volume_slice_action.blockSignals(True)
-            mw.toggle_volume_slice_action.setChecked(not ws.is_slice_collapsed())
-            mw.toggle_volume_slice_action.blockSignals(False)
-
-    def _on_volume_preview_pane_collapsed(self, collapsed: bool) -> None:
-        self._settings_model.set_volume_preview_collapsed(collapsed)
 
     def _on_volume_preview_settings_changed(self) -> None:
         panel = self._main_window.volume_workspace.control_panel
@@ -1581,9 +1561,20 @@ class MainController(QObject):
         self._settings_model.set_volume_preview_native_resolution(
             panel.is_preview_native_resolution()
         )
-
-    def _on_volume_slice_pane_collapsed(self, collapsed: bool) -> None:
-        self._settings_model.set_volume_slice_collapsed(collapsed)
+        # Mode + point-cloud parameters.
+        self._settings_model.set_volume_preview_mode(panel.get_preview_mode())
+        self._settings_model.set_volume_preview_point_size(
+            panel.get_preview_point_size()
+        )
+        self._settings_model.set_volume_preview_point_threshold_auto(
+            panel.is_preview_point_threshold_auto()
+        )
+        self._settings_model.set_volume_preview_point_threshold(
+            panel.get_preview_point_threshold()
+        )
+        self._settings_model.set_volume_preview_iso_color(
+            panel.get_preview_iso_color()
+        )
 
     def _apply_volume_ui_preferences(self):
         """Apply saved brush/class/slice preferences to the volume UI."""
@@ -1613,6 +1604,19 @@ class MainController(QObject):
         panel.set_preview_stride_xy(self._settings_model.get_volume_preview_stride_xy())
         panel.set_preview_native_resolution(
             self._settings_model.get_volume_preview_native_resolution()
+        )
+        panel.set_preview_mode(self._settings_model.get_volume_preview_mode())
+        panel.set_preview_point_size(
+            self._settings_model.get_volume_preview_point_size()
+        )
+        panel.set_preview_point_threshold_auto(
+            self._settings_model.get_volume_preview_point_threshold_auto()
+        )
+        panel.set_preview_point_threshold(
+            self._settings_model.get_volume_preview_point_threshold()
+        )
+        panel.set_preview_iso_color(
+            self._settings_model.get_volume_preview_iso_color()
         )
         n = self._volume_model.num_slices
         if n > 0:
@@ -1660,13 +1664,11 @@ class MainController(QObject):
         ws = self._main_window.volume_workspace
         v_sizes = ws.view_splitter.sizes()
         h_sizes = ws.splitter.sizes()
-        if len(v_sizes) == 2 and sum(v_sizes) > 0:
-            self._settings_model.set_volume_splitter_vertical(v_sizes)
+        if v_sizes and sum(v_sizes) > 0:
+            self._settings_model.set_volume_splitter_vertical(list(v_sizes))
         if len(h_sizes) == 2 and sum(h_sizes) > 0:
             self._settings_model.set_volume_splitter_horizontal(h_sizes)
 
-        self._settings_model.set_volume_preview_collapsed(ws.is_preview_collapsed())
-        self._settings_model.set_volume_slice_collapsed(ws.is_slice_collapsed())
         self._settings_model.set_volume_preview_level(panel.get_preview_level())
         self._settings_model.set_volume_preview_stride_z(panel.get_preview_stride_z())
         self._settings_model.set_volume_preview_stride_xy(panel.get_preview_stride_xy())
